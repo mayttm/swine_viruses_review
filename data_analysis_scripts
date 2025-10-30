@@ -5,9 +5,6 @@ setwd("C:/Users/thongthum.t/OneDrive - University of Florida/Projects/Systematic
 #install.packages("corrr")
 
 ################################################################################
-###------------------------- DESCRIPTIVE STATISTICS -------------------------###
-
-################################################################################
 ###------------------------------ OUTBREAK DATA -----------------------------###
 
 ##------ descriptive summary ------##
@@ -112,7 +109,6 @@ library(sf)
 library(dplyr)
 library(ggplot2)
 library(readr)
-library(ggrepel)
 
 ## --------- Shapefile --------
 canon <- function(x) {
@@ -402,6 +398,7 @@ combined_outb_maps <- outb_map_2011 + outb_map_2012 + outb_map_2013 +
                       outb_map_2018 + outb_map_2019 + outb_map_2020 + 
                       outb_map_2022 + outb_map_2024 +  
                       plot_layout(ncol = 3, nrow = 4) + 
+                      plot_annotation(tag_levels = "A") +
                       plot_annotation(
                       title = "Swine Viruses Outbreaks in China during 2011–2024",
                       theme = theme(plot.title = element_text(size = 16))
@@ -409,7 +406,7 @@ combined_outb_maps <- outb_map_2011 + outb_map_2012 + outb_map_2013 +
 
 print(combined_outb_maps)
 
-ggsave("figures/combined_outbreak_maps.png",
+ggsave("figures/Figure_2_outbreak_maps.png",
        combined_outb_maps, width = 18, height = 16, dpi = 300)
 
 ################################################################################
@@ -783,7 +780,8 @@ AB
 CD
 "
 combined_descriptive_plots <- sample_number_map_molec + sample_number_map_sero + total_virus_map_molec + total_virus_map_sero +
-plot_layout(design = layout, guides = "collect") &
+plot_layout(design = layout, guides = "collect") +
+  plot_annotation(tag_levels = "A") &
   theme(
     legend.position = "right",
     plot.background = element_rect(fill = "white", color = NA),
@@ -791,7 +789,7 @@ plot_layout(design = layout, guides = "collect") &
 
 print(combined_descriptive_plots)
 
-ggsave("figures/combined_descriptive_plots.png",
+ggsave("figures/Figure_5_sample_virus_detection.png",
        combined_descriptive_plots, width = 18, height = 13, dpi = 300)
 
 ###-------------------------- TEMPORAL MAPPING ------------------------------###
@@ -877,7 +875,9 @@ create_temporal_map_log <- function(prov_year_profile, china, periods, max_sampl
   }
   
   combined_map <- wrap_plots(map_list, ncol = 2) +
-    plot_layout(guides = "collect") & theme(legend.position = "bottom")
+    plot_annotation(tag_levels = "A") +
+    plot_layout(guides = "collect") & 
+    theme(legend.position = "bottom")
   
   return(combined_map)
 }
@@ -910,10 +910,10 @@ map_list_sero_log <- create_temporal_map_log(prov_year_profile_sero, china, peri
 print(map_list_molec_log)
 print(map_list_sero_log)
 
-ggsave("figures/temporal_map_molec_log.png",
+ggsave("figures/Figure_3_temporal_map_molec_log.png",
        map_list_molec_log, width = 16, height = 12, dpi = 300)
 
-ggsave("figures/temporal_map_sero_log.png",
+ggsave("figures/Figure_4_temporal_map_sero_log.png",
        map_list_sero_log, width = 16, height = 12, dpi = 300)
 
 ## --------------------------- ABSOLUTE NUMBER -------------------------------- ##
@@ -986,7 +986,9 @@ create_temporal_map_abs <- function(prov_year_profile, china, periods, max_sampl
   }
   
   combined_map <- wrap_plots(map_list, ncol = 2) +
-    plot_layout(guides = "collect") & theme(legend.position = "bottom")
+    plot_layout(guides = "collect") + 
+    plot_annotation(tag_levels = "A") & 
+    theme(legend.position = "bottom")
   
   return(combined_map)
 }
@@ -1017,10 +1019,10 @@ map_list_sero_abs <- create_temporal_map_abs(prov_year_profile_sero, china, peri
 print(map_list_molec_abs)
 print(map_list_sero_abs)
 
-ggsave("figures/temporal_map_molec_abs.png",
+ggsave("figures/Figure_3_temporal_map_molec_abs.png",
        map_list_molec_abs, width = 16, height = 12, dpi = 300)
 
-ggsave("figures/temporal_map_sero_abs.png",
+ggsave("figures/Figure_4_temporal_map_sero_abs.png",
        map_list_sero_abs, width = 16, height = 12, dpi = 300)
 
 ###--------------------  PROVINCIAL VIRUS DISTRIBUTION ----------------------###
@@ -1132,7 +1134,7 @@ province_virus_profile_molec <- process_province_virus_data(data_surv_single_mol
 province_virus_profile_sero <- process_province_virus_data(data_surv_single_sero, "serological")
 
 ## ----- create a function ----
-
+library(ggrepel)
 china <- load_shapefile()
 
 create_combined_plot <- function(data, colors, china, output_file) {
@@ -1192,7 +1194,7 @@ create_combined_plot <- function(data, colors, china, output_file) {
   china_plot <- ggplot(china_map) +
     geom_sf(aes(fill = total_positive), color = "black", size = 0.2) +
     geom_text_repel(aes(label = province_shp, geometry = geometry), 
-                    color = ifelse(china_map$province_shp == "Shandong", "white", "black"),
+                    color = ifelse(china_map$province_shp == "Sichuan", "white", "black"),
                     stat = "sf_coordinates", 
                     min.segment.length = 0, 
                     size = 3) +
@@ -1223,7 +1225,8 @@ create_combined_plot <- function(data, colors, china, output_file) {
   BBBBBBBBB
   "
   combined_plot <- china_plot + donut_chart +
-    plot_layout(design = layout, guides = "collect") &
+    plot_layout(design = layout, guides = "collect") + 
+    plot_annotation(tag_levels = "A") &
     theme(
       legend.position = "right",
       plot.background = element_rect(fill = "white", color = NA),
@@ -1271,7 +1274,7 @@ combined_donut_map_sero <- create_combined_plot(
   data = province_virus_profile_sero,
   colors = pathogen_sero_colors,
   china = china,
-  output_file = "figures/province_virus_profile_sero.png"
+  output_file = "figures/Figure_7_province_virus_profile_molec.png"
 )
 
 print(combined_donut_map_sero)
@@ -1307,7 +1310,7 @@ combined_donut_map_molec <- create_combined_plot(
   data = province_virus_profile_molec,
   colors = pathogen_molec_colors,
   china = china,  
-  output_file = "figures/province_virus_profile_molec.png"
+  output_file = "figures/Figure_6_province_virus_profile_molec.png"
 )
 
 print(combined_donut_map_molec)
@@ -1587,11 +1590,11 @@ if(length(all_maps) == 0) {
 
 # ------- Combine all maps into a single patchwork
 combined_maps <- wrap_plots(all_maps, ncol = 4) +
+  plot_annotation(tag_levels = "A") +
   plot_layout(guides = "collect") &
   theme(legend.position = "bottom")
 
 print(combined_maps)
 
-ggsave("figures/combined_prevalence_maps.png",
-       combined_maps, width = 18, height = 14, dpi = 300)
-
+ggsave("figures/Figure_8_avg_prev_maps.png",
+       combined_maps, width = 22, height = 16, dpi = 300)
