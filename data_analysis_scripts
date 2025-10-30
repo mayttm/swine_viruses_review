@@ -112,6 +112,7 @@ library(sf)
 library(dplyr)
 library(ggplot2)
 library(readr)
+library(ggrepel)
 
 ## --------- Shapefile --------
 canon <- function(x) {
@@ -1190,6 +1191,11 @@ create_combined_plot <- function(data, colors, china, output_file) {
   # China map
   china_plot <- ggplot(china_map) +
     geom_sf(aes(fill = total_positive), color = "black", size = 0.2) +
+    geom_text_repel(aes(label = province_shp, geometry = geometry), 
+                    color = ifelse(china_map$province_shp == "Shandong", "white", "black"),
+                    stat = "sf_coordinates", 
+                    min.segment.length = 0, 
+                    size = 3) +
     scale_fill_viridis_c(
       option = "C", 
       direction = -1,
