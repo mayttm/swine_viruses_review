@@ -5,10 +5,13 @@ setwd("C:/Users/thongthum.t/OneDrive - University of Florida/Projects/Systematic
 #install.packages("corrr")
 
 ################################################################################
+###------------------------- DESCRIPTIVE STATISTICS -------------------------###
+
 ###------------------------------ OUTBREAK DATA -----------------------------###
 
 ##------ descriptive summary ------##
 data_outb_single_sum <- read.csv("data/data_outb_single_summary.csv", stringsAsFactors = FALSE)
+data_outb_single <- read.csv("data/data_outb_single.csv", stringsAsFactors = FALSE)
 
 library(dplyr)
 library(tidyr)
@@ -268,11 +271,20 @@ pathogen_molec_colors <- c(
   PSV = "salmon4",
   PToV = "aquamarine2")
 
-# Function to generate outbreak datasets per year
+##------ create functions------
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(ggpattern)
+library(patchwork)
+
+theme_set(theme_minimal(base_size = 12, base_family = "sans"))
+
 create_yearly_outbreak <- function(df) {
   years <- sort(unique(df$sampling_year))
   yearly_list <- list()
-  
   for (yr in years) {
     df_year <- df %>%
       filter(sampling_year == yr) %>%
@@ -288,59 +300,43 @@ create_yearly_outbreak <- function(df) {
       )
     yearly_list[[as.character(yr)]] <- df_year
   }
-  return(yearly_list)
+  yearly_list
 }
 
 yearly_outbreaks <- create_yearly_outbreak(data_outb_single)
 
-library(ggplot2)
-library(sf)
-
-# Function to create a map for a given year's outbreak dataset
-map_yearly_outbreak <- function(year_df, shapefile_sf, year) {
-  
-  map_df <- shapefile_sf %>%
-    left_join(year_df, by = c("province_shp" = "province"))
-  
-  # Pivot all virus columns (everything except 'province_shp' or other shapefile columns)
-  virus_cols <- setdiff(names(year_df), "province")  # virus columns only
-  map_long <- map_df %>%
-    pivot_longer(
-      cols = all_of(virus_cols),
-      names_to = "virus",
-      values_to = "prevalence"
-    ) %>%
-    filter(prevalence > 0)
-  
-  ggplot() +
-    geom_sf(data = shapefile_sf, fill = "grey90", color = "white") +
-    geom_sf(data = map_long, aes(fill = virus), color = "black") +
-    scale_fill_manual(values = pathogen_molec_colors, na.value = "grey80") +
-    ggtitle(paste("Outbreaks in", year, (province))) +
-    theme_minimal(base_size = 12, title.size = 12) +
-    theme(legend.title = element_blank())
-}
-
-library(ggplot2)
-library(sf)
-library(dplyr)
-library(tidyr)
-library(ggpattern)
-
-map_yearly_outbreak <- function(year_df, shapefile_sf, year) {
-  
+map_yearly_outbreak <- function(year_df, shapefile_sf, year, base_size = 12, line_width = 0.25) {
   year_df <- as.data.frame(year_df)
   
-  # Pivot longer
   year_long <- year_df %>%
     pivot_longer(
       cols = -province,
       names_to = "virus",
       values_to = "prevalence"
     ) %>%
-    filter(prevalence > 0) %>%
+    filter(prevalence > 0)
+  
+  # Only keep viruses that are actually detected AND have defined colors
+  detected_viruses <- intersect(unique(year_long$virus), names(pathogen_molec_colors))
+  
+  # If nothing detected, return a blank map with a note
+  if (length(detected_viruses) == 0) {
+    return(
+      ggplot() +
+        geom_sf(data = shapefile_sf, fill = "grey90", color = "grey40", linewidth = line_width) +
+        labs(title = paste0("Outbreaks in ", year), subtitle = "No outbreaks recorded") +
+        theme(
+          legend.position = "none",
+          plot.title = element_text(size = base_size + 2, family = "sans", face = "bold"),
+          plot.subtitle = element_text(size = base_size - 1, family = "sans")
+        )
+    )
+  }
+  
+  year_long <- year_long %>%
+    filter(virus %in% detected_viruses) %>%
     group_by(province) %>%
-    arrange(province, virus) %>%   # order viruses for consistent layering
+    arrange(province, virus, .by_group = TRUE) %>%
     mutate(rank = row_number()) %>%
     ungroup()
   
@@ -348,36 +344,41 @@ map_yearly_outbreak <- function(year_df, shapefile_sf, year) {
     inner_join(year_long, by = c("province_shp" = "province")) %>%
     st_as_sf()
   
-  first_virus <- map_long %>% filter(rank == 1)
+  first_virus    <- filter(map_long, rank == 1)
+  stripe_viruses <- filter(map_long, rank > 1)
   
-  stripe_viruses <- map_long %>% filter(rank > 1)
-  
-  provinces_with_outbreak <- unique(map_long$province_shp) %>% paste(collapse = ", ")
+  provinces_with_outbreak <- unique(map_long$province_shp)
+  subtitle_text <- paste(provinces_with_outbreak, collapse = ", ")
   
   ggplot() +
-    geom_sf(data = shapefile_sf, fill = "grey90", color = "grey30") +
-    geom_sf(data = first_virus, aes(fill = virus), color = "black") +
+    geom_sf(data = shapefile_sf, fill = "grey90", color = "grey40", linewidth = line_width) +
+    geom_sf(data = first_virus, aes(fill = virus), color = "black", linewidth = line_width, show.legend = TRUE) +
     geom_sf_pattern(
       data = stripe_viruses,
       aes(pattern_fill = virus),
       fill = NA,
       pattern = "stripe",
       color = "black",
+      linewidth = line_width,
       pattern_density = 0.5,
       pattern_spacing = 0.02,
-      pattern_angle = 45
+      pattern_angle = 45,
+      show.legend = FALSE
     ) +
-    scale_fill_manual(values = pathogen_molec_colors, na.value = "grey80") +
-    scale_pattern_fill_manual(values = pathogen_molec_colors) +
-    ggtitle(paste0("Outbreaks in ", year, " (", provinces_with_outbreak, ")")) +
-    theme_minimal(base_size = 14) +
+    # Only show detected viruses in the legend
+    scale_fill_manual(values = pathogen_molec_colors, limits = detected_viruses, drop = TRUE) +
+    scale_pattern_fill_manual(values = pathogen_molec_colors, limits = detected_viruses, drop = TRUE) +
+    labs(title = paste0("Outbreaks in ", year), subtitle = subtitle_text) +
+    coord_sf(expand = FALSE) +
     theme(
-      legend.title = element_text(size = 14, family = "sans"),
-      plot.title = element_text(size = 14, family = "sans")
+      legend.title = element_blank(),
+      plot.title = element_text(size = base_size + 2, family = "sans"),
+      plot.subtitle = element_text(size = base_size - 1, family = "sans"),
+      legend.text = element_text(size = base_size - 1, family = "sans")
     )
 }
 
-#create individual maps
+# Create individual maps
 outb_map_2011 <- map_yearly_outbreak(yearly_outbreaks[["2011"]], china, 2011)
 outb_map_2012 <- map_yearly_outbreak(yearly_outbreaks[["2012"]], china, 2012)
 outb_map_2013 <- map_yearly_outbreak(yearly_outbreaks[["2013"]], china, 2013)
@@ -390,29 +391,35 @@ outb_map_2020 <- map_yearly_outbreak(yearly_outbreaks[["2020"]], china, 2020)
 outb_map_2022 <- map_yearly_outbreak(yearly_outbreaks[["2022"]], china, 2022)
 outb_map_2024 <- map_yearly_outbreak(yearly_outbreaks[["2024"]], china, 2024)
 
-print(outb_map_2017)
-
-# Combine using patchwork with a custom layout
-combined_outb_maps <- outb_map_2011 + outb_map_2012 + outb_map_2013 + 
-                      outb_map_2015 + outb_map_2016 + outb_map_2017 +
-                      outb_map_2018 + outb_map_2019 + outb_map_2020 + 
-                      outb_map_2022 + outb_map_2024 +  
-                      plot_layout(ncol = 3, nrow = 4) + 
-                      plot_annotation(tag_levels = "A") +
-                      plot_annotation(
-                      title = "Swine Viruses Outbreaks in China during 2011–2024",
-                      theme = theme(plot.title = element_text(size = 16))
-                      )
+# Combine and collect legends (will show only viruses detected across the included maps)
+combined_outb_maps <- outb_map_2011 + outb_map_2012 + outb_map_2013 +
+  outb_map_2015 + outb_map_2016 + outb_map_2017 +
+  outb_map_2018 + outb_map_2019 + outb_map_2020 +
+  outb_map_2022 + outb_map_2024 +
+  plot_layout(ncol = 3, nrow = 4, guides = "keep") +
+  plot_annotation(
+    title = "Swine Viruses Outbreaks in China during 2011–2024",
+    theme = theme(plot.title = element_text(size = 14, family = "sans", face = "bold"))
+  )
 
 print(combined_outb_maps)
 
-ggsave("figures/Figure_2_outbreak_maps.png",
-       combined_outb_maps, width = 18, height = 16, dpi = 300)
+# Export to TIFF
+ggsave(
+  filename = "figures/Figure_2_outbreak_maps.tiff",
+  plot = combined_outb_maps,
+  width = 18, height = 16, units = "in",
+  dpi = 600, device = "tiff",
+  compression = "lzw",
+  bg = "white"
+)
 
-################################################################################
-###---------------------- SURVEILLANCE DATA ANALYSIS ------------------------###
+
+#####------------------------- SURVEILLANCE DATA---------------------------#####
 
 ###--------------- VIRUS LEVEL SUMMARY-------------------###
+
+data_surv_single <- read.csv("data/data_surv_single_20251028.csv", stringsAsFactors = FALSE)
 
 library(dplyr)
 
@@ -437,28 +444,24 @@ print(virus_summary)
 
 ##------------------------ PREPARING DATASETS-------------------------------##
 
-library(dplyr)
-
-data_surv_single <- read.csv("data/data_surv_single_20251028.csv", stringsAsFactors = FALSE)
-
-# ---- 1. Clean data ----
+# 1. Clean data
 data_surv_single <- data_surv_single %>%
   mutate(
     virus = trimws(virus),
     province = trimws(province)
   )
 
-# ---- 2. Calculate virus prevalence ----
+# 2. Calculate virus prevalence 
 virus_freq <- data_surv_single %>%
   count(virus, name = "n") %>%
   mutate(freq = n / nrow(data_surv_single))
 
-# ---- 3. Identify viruses below threshold ----
+# 3. Identify viruses below threshold 
 low_freq_viruses <- virus_freq %>%
   filter(freq < 0.01) %>%
   pull(virus)
 
-# ---- 4. Group viruses ----
+# 4. Group viruses
 data_surv_single <- data_surv_single %>%
   mutate(
     virus_group = case_when(
@@ -575,7 +578,16 @@ data_surv_single_sero <- data_surv_single %>%
 library(dplyr)
 library(tidyr)
 
+
 process_province_data <- function(data) {
+  # Filter only independent samples
+  data <- data %>%
+    filter(independent_sample == "yes")
+  
+  if (nrow(data) == 0) {
+    warning(paste("No independent samples found for", title))
+    return(NULL)
+  }
   # Step 2: Province-Level Summary
   province_profile <- data %>%
     group_by(province) %>%
@@ -702,6 +714,14 @@ china <- load_shapefile()
 
 ##-------------------------- create plot functions -------------------------- ##
 
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(patchwork)
+# install.packages("ragg")
+library(ragg)
+
 # Load the shapefile
 china <- load_shapefile()
 
@@ -719,12 +739,13 @@ create_sample_plot <- function(data, value_col, title, legend_name, china, data_
     scale_fill_viridis_c(
       option = "plasma",
       direction = -1,
-      na.value = "grey",
+      na.value = "grey85",
       name = legend_name,
       n.breaks = 5,
-      limits = c(0, 70000)
+      limits = c(1, 70000)
     ) +
-    theme_minimal(base_size = 14) +
+    # Keep same base size, specify base_family for consistent TIFF text rendering
+    theme_minimal(base_size = 14, base_family = "sans") +
     labs(
       title = title,
       subtitle = paste(data_type, "detection")
@@ -747,12 +768,13 @@ create_virus_no_plot <- function(data, value_col, title, legend_name, china, dat
     scale_fill_viridis_c(
       option = "plasma",
       direction = -1,
-      na.value = "grey",
+      na.value = "grey85",
       name = legend_name,
       n.breaks = 4,
-      limits = c(0, 30)
+      limits = c(1, 20)
     ) +
-    theme_minimal(base_size = 14) +
+    # Keep same base size, specify base_family for consistent TIFF text rendering
+    theme_minimal(base_size = 14, base_family = "sans") +
     labs(
       title = title,
       subtitle = paste(data_type, "detection")
@@ -761,12 +783,22 @@ create_virus_no_plot <- function(data, value_col, title, legend_name, china, dat
   return(map_plot)
 }
 
-#---------Create and plots for total samples and total distinct viruses
+# --------- Create and plots for total samples and total distinct viruses
+total_virus_map_molec <- create_virus_no_plot(
+  province_profile_molec, "frequency_virus_detected",
+  "Number of distinct viruses detected", "Frequency", china, "Molecular")
 
-total_virus_map_molec <- create_virus_no_plot(province_profile_molec, "frequency_virus_detected", "Number of distinct viruses detected", "Frequency", china, "Molecular")
-sample_number_map_molec <- create_sample_plot(province_profile_molec, "sample_number", "Total pig samples by province", "Total samples", china, "Molecular")
-total_virus_map_sero <- create_virus_no_plot(province_profile_sero, "frequency_virus_detected", "Number of distinct viruses detected", "Frequency", china, "Serological")
-sample_number_map_sero <- create_sample_plot(province_profile_sero, "sample_number", "Total pig samples by province", "Total samples", china, "Serological")
+sample_number_map_molec <- create_sample_plot(
+  province_profile_molec, "sample_number",
+  "Total pig samples by province", "Total samples", china, "Molecular")
+
+total_virus_map_sero <- create_virus_no_plot(
+  province_profile_sero, "frequency_virus_detected",
+  "Number of distinct viruses detected", "Frequency", china, "Serological")
+
+sample_number_map_sero <- create_sample_plot(
+  province_profile_sero, "sample_number",
+  "Total pig samples by province", "Total samples", china, "Serological")
 
 print(total_virus_map_molec)
 print(sample_number_map_molec)
@@ -774,23 +806,34 @@ print(total_virus_map_sero)
 print(sample_number_map_sero)
 
 # ----- Combine plots with patchwork -----
-
 layout <- "
 AB
 CD
 "
-combined_descriptive_plots <- sample_number_map_molec + sample_number_map_sero + total_virus_map_molec + total_virus_map_sero +
-plot_layout(design = layout, guides = "collect") +
+
+combined_descriptive_plots <- sample_number_map_molec + sample_number_map_sero +
+  total_virus_map_molec + total_virus_map_sero +
+  plot_layout(design = layout, guides = "collect") +
   plot_annotation(tag_levels = "A") &
   theme(
     legend.position = "right",
     plot.background = element_rect(fill = "white", color = NA),
-    panel.spacing = unit(0.5, "lines"))
+    panel.spacing = unit(0.5, "lines"),
+    text = element_text(family = "sans")  # ensure consistent font family in TIFF
+  )
 
 print(combined_descriptive_plots)
 
-ggsave("figures/Figure_5_sample_virus_detection.png",
-       combined_descriptive_plots, width = 18, height = 13, dpi = 300)
+# Export
+ggsave(
+  filename = "figures/Figure_5_sample_virus_detection.tiff",
+  plot = combined_descriptive_plots,
+  width = 20, height = 14, units = "in",
+  dpi = 600,
+  device = ragg::agg_tiff,  
+  compression = "lzw",
+  bg = "white"
+)
 
 ###-------------------------- TEMPORAL MAPPING ------------------------------###
 
@@ -800,11 +843,22 @@ library(ggplot2)
 library(sf)
 library(viridis)
 library(patchwork)
+library(ragg)
 
 ## ----------------------------- LOG SCALE ---------------------------------- ##
-## 1. Define a function to prepare and bin years into periods
 
+## 1. Define a function to prepare and bin years into periods
 prepare_prov_year_profile <- function(data) {
+  # Filter only independent samples
+  data <- data %>%
+    filter(independent_sample == "yes")
+  
+  # Skip if dataset is empty after filtering
+  if (nrow(data) == 0) {
+    warning(paste("No independent samples found for", title))
+    return(NULL)
+  }
+  
   data_clean <- data %>%
     transmute(
       sampling_year = as.integer(sampling_year),
@@ -837,35 +891,42 @@ prepare_prov_year_profile <- function(data) {
 
 ## 2. Define a function to create map plots for each period:
 
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(patchwork)
+library(ragg)
+
 create_temporal_map_log <- function(prov_year_profile, china, periods, max_sample_size, data_type) {
   map_list <- list()
   max_log_sample_size <- log1p(max_sample_size)
   
   for (period in periods) {
     period_data <- prov_year_profile %>%
-      select(province, period) %>%
-      rename(total_samples = !!sym(period))
+      dplyr::select(province, period) %>%
+      dplyr::rename(total_samples = !!sym(period))
     
     # Join the shapefile with the profile data for the period
     china_period <- china %>%
-      left_join(period_data, by = c("province_shp" = "province")) %>%
-      mutate(temp_value = replace_na(total_samples, 0)) %>%
-      mutate(
+      dplyr::left_join(period_data, by = c("province_shp" = "province")) %>%
+      dplyr::mutate(temp_value = tidyr::replace_na(total_samples, 0)) %>%
+      dplyr::mutate(
         temp_value = ifelse(province_shp %in% c("Taiwan", "Hong Kong", "Macau"), NA, temp_value)
       ) %>%
-      mutate(total_samples = log1p(temp_value))
+      dplyr::mutate(total_samples = log1p(temp_value))
     
-    # Create the map plot
+    # Create the map plot (keep same features; set base_family for TIFF consistency)
     map_plot <- ggplot(data = china_period) +
       geom_sf(aes(fill = total_samples)) +
       scale_fill_viridis_c(
-        limits = c(0, max_log_sample_size),
+        limits = c(1, max_log_sample_size),
         name = "Total samples (log scale)",
         option = "plasma",
+        na.value = "grey85",
         direction = -1,
         guide = guide_colorbar(barwidth = 15, barheight = 1)
       ) +
-      theme_minimal(base_size = 14) +
+      theme_minimal(base_size = 14, base_family = "sans") +
       labs(
         title = paste("Total pig samples during", period),
         subtitle = paste(data_type, "detection")
@@ -876,49 +937,68 @@ create_temporal_map_log <- function(prov_year_profile, china, periods, max_sampl
   
   combined_map <- wrap_plots(map_list, ncol = 2) +
     plot_annotation(tag_levels = "A") +
-    plot_layout(guides = "collect") & 
-    theme(legend.position = "bottom")
+    plot_layout(guides = "collect") &
+    theme(
+      legend.position = "bottom",
+      text = element_text(family = "sans")  # ensure consistent font in TIFF
+    )
   
   return(combined_map)
 }
 
 ## 3. create temporal maps
-
 # Prepare province-year profiles for both datasets
 prov_year_profile_molec <- prepare_prov_year_profile(data_surv_single_molec)
 prov_year_profile_sero <- prepare_prov_year_profile(data_surv_single_sero)
 
 # Calculate the maximum sample size across all periods for each dataset
 max_sample_size_molec <- prov_year_profile_molec %>%
-  select(-province) %>%
-  summarise(across(everything(), max, na.rm = TRUE)) %>%
+  dplyr::select(-province) %>%
+  dplyr::summarise(dplyr::across(dplyr::everything(), max, na.rm = TRUE)) %>%
   unlist() %>%
   max()
+
 max_sample_size_sero <- prov_year_profile_sero %>%
-  select(-province) %>%
-  summarise(across(everything(), max, na.rm = TRUE)) %>%
+  dplyr::select(-province) %>%
+  dplyr::summarise(dplyr::across(dplyr::everything(), max, na.rm = TRUE)) %>%
   unlist() %>%
   max()
 
 china <- load_shapefile()
-
 periods <- c("2000-2009", "2009-2015", "2015-2020", "2020-2024")
 
 map_list_molec_log <- create_temporal_map_log(prov_year_profile_molec, china, periods, max_sample_size_molec, "Molecular")
-map_list_sero_log <- create_temporal_map_log(prov_year_profile_sero, china, periods, max_sample_size_sero, "Serological")
+map_list_sero_log  <- create_temporal_map_log(prov_year_profile_sero, china, periods, max_sample_size_sero, "Serological")
 
 print(map_list_molec_log)
 print(map_list_sero_log)
 
-ggsave("figures/Figure_3_temporal_map_molec_log.png",
-       map_list_molec_log, width = 16, height = 12, dpi = 300)
+# Export 
+ggsave(
+  "figures/Figure_3_temporal_map_molec_log.tiff",
+  map_list_molec_log, width = 16, height = 12, units = "in",
+  dpi = 600, device = ragg::agg_tiff, compression = "lzw", bg = "white"
+)
 
-ggsave("figures/Figure_4_temporal_map_sero_log.png",
-       map_list_sero_log, width = 16, height = 12, dpi = 300)
+ggsave(
+  "figures/Figure_5_temporal_map_sero_log.tiff",
+  map_list_sero_log, width = 16, height = 12, units = "in",
+  dpi = 600, device = ragg::agg_tiff, compression = "lzw", bg = "white"
+)
 
 ## --------------------------- ABSOLUTE NUMBER -------------------------------- ##
 
 prepare_prov_year_profile <- function(data) {
+  # Filter only independent samples
+  data <- data %>%
+    filter(independent_sample == "yes")
+  
+  # Skip if dataset is empty after filtering
+  if (nrow(data) == 0) {
+    warning(paste("No independent samples found for", title))
+    return(NULL)
+  }
+  
   data_clean <- data %>%
     transmute(
       sampling_year = as.integer(sampling_year),
@@ -949,34 +1029,44 @@ prepare_prov_year_profile <- function(data) {
   return(prov_year_profile)
 }
 
+## -- create plotting function
+
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(patchwork)
+library(ragg)      
+library(tidyr)     
+
 create_temporal_map_abs <- function(prov_year_profile, china, periods, max_sample_size, data_type) {
   map_list <- list()
   
   for (period in periods) {
     period_data <- prov_year_profile %>%
-      select(province, period) %>%
-      rename(total_samples = !!sym(period))
+      dplyr::select(province, period) %>%
+      dplyr::rename(total_samples = !!sym(period))
     
     # Join the shapefile with profile data for the period and handle NA values for specific provinces
     china_period <- china %>%
-      left_join(period_data, by = c("province_shp" = "province")) %>%
-      mutate(
-        temp_value = replace_na(total_samples, 0),
+      dplyr::left_join(period_data, by = c("province_shp" = "province")) %>%
+      dplyr::mutate(
+        temp_value = tidyr::replace_na(total_samples, 0),
         temp_value = ifelse(province_shp %in% c("Taiwan", "Hong Kong", "Macau"), NA, temp_value)
       ) %>%
-      mutate(total_samples = temp_value)
+      dplyr::mutate(total_samples = temp_value)
     
-    # Create the map plot
+    # Create the map plot (keep features; specify base_family for consistent TIFF text rendering)
     map_plot <- ggplot(data = china_period) +
       geom_sf(aes(fill = total_samples)) +
       scale_fill_viridis_c(
-        limits = c(0, max_sample_size),
+        limits = c(1, max_sample_size),
         name = "Total samples",
         option = "plasma",
+        na.value = "grey85",
         direction = -1,
         guide = guide_colorbar(barwidth = 15, barheight = 1)
       ) +
-      theme_minimal(base_size = 14) +
+      theme_minimal(base_size = 14, base_family = "sans") +
       labs(
         title = paste("Total pig samples during", period),
         subtitle = paste(data_type, "detection")
@@ -986,44 +1076,187 @@ create_temporal_map_abs <- function(prov_year_profile, china, periods, max_sampl
   }
   
   combined_map <- wrap_plots(map_list, ncol = 2) +
-    plot_layout(guides = "collect") + 
-    plot_annotation(tag_levels = "A") & 
-    theme(legend.position = "bottom")
+    plot_layout(guides = "collect") +
+    plot_annotation(tag_levels = "A") &
+    theme(
+      legend.position = "bottom",
+      text = element_text(family = "sans")  # ensure consistent font family in TIFF
+    )
   
   return(combined_map)
 }
 
 # Prepare province-year profiles for both datasets
 prov_year_profile_molec <- prepare_prov_year_profile(data_surv_single_molec)
-prov_year_profile_sero <- prepare_prov_year_profile(data_surv_single_sero)
+prov_year_profile_sero  <- prepare_prov_year_profile(data_surv_single_sero)
 
 # Calculate the maximum sample size across all periods for each dataset
 max_sample_size_molec <- prov_year_profile_molec %>%
-  select(-province) %>%
-  summarise(across(everything(), max, na.rm = TRUE)) %>%
+  dplyr::select(-province) %>%
+  dplyr::summarise(dplyr::across(dplyr::everything(), max, na.rm = TRUE)) %>%
   unlist() %>%
   max()
+
 max_sample_size_sero <- prov_year_profile_sero %>%
-  select(-province) %>%
-  summarise(across(everything(), max, na.rm = TRUE)) %>%
+  dplyr::select(-province) %>%
+  dplyr::summarise(dplyr::across(dplyr::everything(), max, na.rm = TRUE)) %>%
   unlist() %>%
   max()
 
 china <- load_shapefile()
-
 periods <- c("2000-2009", "2009-2015", "2015-2020", "2020-2024")
 
 map_list_molec_abs <- create_temporal_map_abs(prov_year_profile_molec, china, periods, max_sample_size_molec, "Molecular")
-map_list_sero_abs <- create_temporal_map_abs(prov_year_profile_sero, china, periods, max_sample_size_sero, "Serological")
+map_list_sero_abs  <- create_temporal_map_abs(prov_year_profile_sero,  china, periods, max_sample_size_sero,  "Serological")
 
 print(map_list_molec_abs)
 print(map_list_sero_abs)
 
-ggsave("figures/Figure_3_temporal_map_molec_abs.png",
-       map_list_molec_abs, width = 16, height = 12, dpi = 300)
+# Export
+ggsave(
+  "figures/Figure_3_temporal_map_molec_abs.tiff",
+  map_list_molec_abs, width = 16, height = 12, units = "in",
+  dpi = 600, device = ragg::agg_tiff, compression = "lzw", bg = "white"
+)
 
-ggsave("figures/Figure_4_temporal_map_sero_abs.png",
-       map_list_sero_abs, width = 16, height = 12, dpi = 300)
+ggsave(
+  "figures/Figure_5_temporal_map_sero_abs.tiff",
+  map_list_sero_abs, width = 16, height = 12, units = "in",
+  dpi = 600, device = ragg::agg_tiff, compression = "lzw", bg = "white"
+)
+
+###-------------------- TEMPORAL TREND OF VIRUS DETECTION -------------------###
+
+prepare_year_virus_profile <- function(data) {
+  # Filter only independent samples
+  data <- data %>%
+    filter(independent_sample == "yes")
+  # Skip if dataset is empty after filtering
+  if (nrow(data) == 0) {
+    warning(paste("No independent samples found for", title))
+    return(NULL)
+  }
+  data_clean <- data %>%
+    transmute(
+      sampling_year = as.integer(sampling_year),
+      province = trimws(province),
+      virus = trimws(virus)
+    ) %>%
+    filter(!is.na(sampling_year), !is.na(province))
+  prov_year_profile <- data_clean %>%
+    filter(sampling_year >= 2000, sampling_year <= 2024) %>%
+    mutate(period = case_when(
+      sampling_year >= 2000 & sampling_year < 2009 ~ "2000-2009",
+      sampling_year >= 2009 & sampling_year < 2015 ~ "2009-2015",
+      sampling_year >= 2015 & sampling_year < 2020 ~ "2015-2020",
+      sampling_year >= 2020 & sampling_year <= 2024 ~ "2020-2024",
+      TRUE ~ NA_character_
+    )) %>%
+    filter(!is.na(period)) %>%
+    group_by(province, period) %>%
+    summarise(total_virus = n_distinct(virus, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(
+      names_from = period,
+      values_from = total_virus,
+      values_fill = 0
+    ) %>%
+    arrange(province)
+  return(prov_year_profile)
+}
+
+
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(patchwork)
+library(ragg)      # high-quality, consistent TIFF output
+library(tidyr)     # for replace_na
+
+create_temporal_virus_abs <- function(prov_year_profile, china, periods, max_sample_size, data_type) {
+  map_list <- list()
+  for (period in periods) {
+    period_data <- prov_year_profile %>%
+      dplyr::select(province, period) %>%
+      dplyr::rename(total_virus = !!sym(period))
+    
+    # Join the shapefile with profile data for the period and handle NA values for specific provinces
+    china_period <- china %>%
+      dplyr::left_join(period_data, by = c("province_shp" = "province")) %>%
+      dplyr::mutate(
+        temp_value = tidyr::replace_na(total_virus, 0),
+        temp_value = ifelse(province_shp %in% c("Taiwan", "Hong Kong", "Macau"), NA, temp_value)
+      ) %>%
+      dplyr::mutate(total_virus = temp_value)
+    
+    # Create the map plot (features unchanged; base_family set for TIFF consistency)
+    map_plot <- ggplot(data = china_period) +
+      geom_sf(aes(fill = total_virus)) +
+      scale_fill_viridis_c(
+        limits = c(1, max_sample_size),
+        name = "Distinct virus",
+        option = "plasma",
+        na.value = "grey85",
+        direction = -1,
+        guide = guide_colorbar(barwidth = 15, barheight = 1)
+      ) +
+      theme_minimal(base_size = 14, base_family = "sans") +
+      labs(
+        title = paste("Total distinct virus detected during", period),
+        subtitle = paste(data_type, "detection")
+      )
+    
+    map_list[[period]] <- map_plot
+  }
+  
+  combined_map <- wrap_plots(map_list, ncol = 2) +
+    plot_layout(guides = "collect") +
+    plot_annotation(tag_levels = "A") &
+    theme(
+      legend.position = "bottom",
+      text = element_text(family = "sans")  
+    )
+  
+  return(combined_map)
+}
+
+# Prepare province-year profiles for both datasets
+prov_year_virus_molec <- prepare_year_virus_profile(data_surv_single_molec)
+prov_year_virus_sero  <- prepare_year_virus_profile(data_surv_single_sero)
+
+# Calculate the maximum sample size across all periods for each dataset
+max_sample_size_virus_molec <- prov_year_virus_molec %>%
+  dplyr::select(-province) %>%
+  dplyr::summarise(dplyr::across(dplyr::everything(), max, na.rm = TRUE)) %>%
+  unlist() %>%
+  max()
+
+max_sample_size_virus_sero <- prov_year_virus_sero %>%
+  dplyr::select(-province) %>%
+  dplyr::summarise(dplyr::across(dplyr::everything(), max, na.rm = TRUE)) %>%
+  unlist() %>%
+  max()
+
+china <- load_shapefile()
+periods <- c("2000-2009", "2009-2015", "2015-2020", "2020-2024")
+
+map_list_virus_molec_abs <- create_temporal_virus_abs(prov_year_virus_molec, china, periods, max_sample_size_virus_molec, "Molecular")
+map_list_virus_sero_abs  <- create_temporal_virus_abs(prov_year_virus_sero,  china, periods, max_sample_size_virus_sero,  "Serological")
+
+print(map_list_virus_molec_abs)
+print(map_list_virus_sero_abs)
+
+# Export
+ggsave(
+  "figures/Figure_4_temporal_virus_molec_abs.tiff",
+  map_list_virus_molec_abs, width = 16, height = 12, units = "in",
+  dpi = 600, device = ragg::agg_tiff, compression = "lzw", bg = "white"
+)
+
+ggsave(
+  "figures/Figure_6_temporal_virus_sero_abs.tiff",
+  map_list_virus_sero_abs, width = 16, height = 12, units = "in",
+  dpi = 600, device = ragg::agg_tiff, compression = "lzw", bg = "white"
+)
 
 ###--------------------  PROVINCIAL VIRUS DISTRIBUTION ----------------------###
 
@@ -1133,16 +1366,25 @@ process_province_virus_data <- function(data, diag_type) {
 province_virus_profile_molec <- process_province_virus_data(data_surv_single_molec, "molecular")
 province_virus_profile_sero <- process_province_virus_data(data_surv_single_sero, "serological")
 
-## ----- create a function ----
+## ----- create plotting function
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(patchwork)
 library(ggrepel)
+library(ragg)   # for consistent, high-quality TIFF output
+library(grid)   # for unit()
+
 china <- load_shapefile()
 
-create_combined_plot <- function(data, colors, china, output_file) {
+create_combined_plot <- function(data, data_2, colors, china, output_file) {
   # Prepare the wide-format province dataset
   virus_cols <- setdiff(colnames(data), "province")
   data_long <- data %>%
     pivot_longer(cols = all_of(virus_cols), names_to = "virus", values_to = "count") %>%
-    mutate(count = as.numeric(count)) %>%  # Ensure 'count' is numeric
+    mutate(count = as.numeric(count)) %>%
     group_by(province) %>%
     mutate(perc = 100 * count / sum(count, na.rm = TRUE)) %>%
     ungroup()
@@ -1155,10 +1397,11 @@ create_combined_plot <- function(data, colors, china, output_file) {
     arrange(desc(perc), .by_group = TRUE) %>%
     ungroup()
   
-  # Summarize total positive samples by province and match with shapefile key
-  province_positive <- data_long %>%
+  # Use the province_profile dataset for province_positive
+  province_positive <- data_2 %>%
+    mutate(total_positive = as.numeric(total_positive)) %>%
     group_by(province) %>%
-    summarise(total_positive = sum(count, na.rm = TRUE), .groups = "drop") %>%
+    summarise(total_positive = sum(total_positive, na.rm = TRUE), .groups = "drop") %>%
     mutate(prov_key = canon(province))
   
   # Merge with shapefile data
@@ -1179,38 +1422,53 @@ create_combined_plot <- function(data, colors, china, output_file) {
     scale_fill_manual(values = colors) +
     theme_void() +
     theme(
-      strip.text = element_text(size = 14, family = "sans"),
+      strip.text  = element_text(size = 16, family = "sans"),
       legend.position = "right",
-      legend.title = element_text(size = 14, family = "sans"),
-      legend.text = element_text(size = 14, family = "sans"),
-      plot.title = element_text(size = 14, family = "sans"),
-      plot.subtitle = element_text(size = 14, family = "sans"),
-      plot.caption = element_text(size = 14, family = "sans"),
-      plot.tag = element_text(size = 14, family = "sans")
+      legend.title = element_text(size = 16, family = "sans"),
+      legend.text  = element_text(size = 16, family = "sans"),
+      plot.title   = element_text(size = 16, family = "sans"),
+      plot.subtitle= element_text(size = 16, family = "sans"),
+      plot.caption = element_text(size = 16, family = "sans"),
+      plot.tag     = element_text(size = 16, family = "sans")
     ) +
     guides(fill = guide_legend(title = "Virus"))
   
   # China map
   china_plot <- ggplot(china_map) +
     geom_sf(aes(fill = total_positive), color = "black", size = 0.2) +
-    geom_text_repel(aes(label = province_shp, geometry = geometry), 
-                    color = ifelse(china_map$province_shp == "Sichuan", "white", "black"),
-                    stat = "sf_coordinates", 
-                    min.segment.length = 0, 
-                    size = 3) +
+    geom_text_repel(
+      aes(label = province_shp, geometry = geometry),
+      #color = ifelse(china_map$province_shp %in% c("Sichuan", "Guangxi", "Guangdong"), "white", "black"),
+      color = ifelse(china_map$province_shp %in% c("Shandong"), "white", "black"),
+      stat = "sf_coordinates",
+      min.segment.length = 0,
+      size = 3
+    ) +
     scale_fill_viridis_c(
-      option = "C", 
+      name = "Total positive samples by province",
+      option = "C",
       direction = -1,
-      na.value = "grey"  
+      na.value = "grey85",
+      limits = c(0, 25000),
+      guide = guide_colorbar(
+        barheight = unit(5, "cm"),
+        barwidth  = unit(0.5, "cm"),
+        title.position = "top",
+        title.hjust = 0,
+        title.theme = element_text(
+          size = 14, family = "sans",
+          margin = margin(b = 15)
+        )
+      )
     ) +
     theme(
       panel.background = element_rect(fill = "white", color = NA),
       panel.grid.major = element_line(color = "grey80", size = 0.3),
       panel.grid.minor = element_line(color = "grey90", size = 0.2),
       legend.position = "right",
-      legend.title = element_text(size = 14, family = "sans"),
-      legend.text = element_text(size = 14, family = "sans"),
-      plot.margin = margin(1, 1, 1, 1, "cm")
+      legend.title = element_text(size = 16, family = "sans"),
+      legend.text  = element_text(size = 16, family = "sans"),
+      plot.margin  = margin(1, 1, 1, 1, "cm")
     ) +
     labs(fill = "Total positive samples by province")
   
@@ -1224,63 +1482,34 @@ create_combined_plot <- function(data, colors, china, output_file) {
   BBBBBBBBB
   BBBBBBBBB
   "
+  
   combined_plot <- china_plot + donut_chart +
-    plot_layout(design = layout, guides = "collect") + 
+    plot_layout(design = layout, guides = "collect") +
     plot_annotation(tag_levels = "A") &
     theme(
       legend.position = "right",
       plot.background = element_rect(fill = "white", color = NA),
-      panel.spacing = unit(0.5, "lines")
+      panel.spacing = unit(0.5, "lines"),
+      text = element_text(family = "sans")  # ensures consistent font rendering in TIFF
     )
   
-  # Save combined plot
+  # Save combined plot as high-resolution TIFF (features unchanged)
   ggsave(
     filename = output_file,
     plot = combined_plot,
-    width = 14,
-    height = 16,
-    dpi = 300
+    width = 15,
+    height = 18,
+    units = "in",
+    dpi = 600,
+    device = ragg::agg_tiff,
+    compression = "lzw",
+    bg = "white"
   )
   
   return(combined_plot)
 }
 
-## 3. create sero combined plots
-
-pathogen_sero_colors <- c(
-  PBoV = "darkorange4",
-  PoRV = "brown1",
-  PKoV = "salmon2",
-  CSFV = "hotpink",
-  TGEV = "brown4",
-  HEV = "red3",
-  IAV_H1N1 = "darkorange1",
-  PCV2 = "darkgoldenrod1",
-  PCV3 = "yellowgreen",
-  PDCoV = "darkgreen",
-  PEDV = "cyan3",
-  PRRSV = "blue3",
-  PRV = "purple4",
-  Others = "grey20",
-  AIV = "violet",
-  EMCV = "turquoise4",
-  SaV = "goldenrod4",
-  PPV = "cyan4",
-  SFTSV = "magenta3",
-  GETV = "gray70",
-  JEV = "aquamarine2")
-
-combined_donut_map_sero <- create_combined_plot(
-  data = province_virus_profile_sero,
-  colors = pathogen_sero_colors,
-  china = china,
-  output_file = "figures/Figure_7_province_virus_profile_molec.png"
-)
-
-print(combined_donut_map_sero)
-
-## 4. create molec combined plots
-
+## 3. create molec combined plots
 pathogen_molec_colors <- c(
   PBoV = "darkorange4",
   PoRV = "brown1",
@@ -1304,16 +1533,53 @@ pathogen_molec_colors <- c(
   PAstV = "cyan4",
   MRV2 = "magenta3",
   PSV = "salmon4",
-  PToV = "aquamarine2")
+  PToV = "aquamarine2"
+)
 
 combined_donut_map_molec <- create_combined_plot(
   data = province_virus_profile_molec,
+  data_2 = province_profile_molec,
   colors = pathogen_molec_colors,
-  china = china,  
-  output_file = "figures/Figure_6_province_virus_profile_molec.png"
+  china = china,
+  output_file = "figures/Figure_7_province_virus_profile_molec.tiff"
 )
 
 print(combined_donut_map_molec)
+
+## 4. create sero combined plots
+pathogen_sero_colors <- c(
+  PBoV = "darkorange4",
+  PoRV = "brown1",
+  PKoV = "salmon2",
+  CSFV = "hotpink",
+  TGEV = "brown4",
+  HEV = "red3",
+  IAV_H1N1 = "darkorange1",
+  PCV2 = "darkgoldenrod1",
+  PCV3 = "yellowgreen",
+  PDCoV = "darkgreen",
+  PEDV = "cyan3",
+  PRRSV = "blue3",
+  PRV = "purple4",
+  Others = "grey20",
+  AIV = "violet",
+  EMCV = "turquoise4",
+  SaV = "goldenrod4",
+  PPV = "cyan4",
+  SFTSV = "magenta3",
+  GETV = "gray70",
+  JEV = "aquamarine2"
+)
+
+combined_donut_map_sero <- create_combined_plot(
+  data = province_virus_profile_sero,
+  data_2 = province_profile_sero,
+  colors = pathogen_sero_colors,
+  china = china,
+  output_file = "figures/Figure_8_province_virus_profile_sero.tiff"
+)
+
+print(combined_donut_map_sero)
 
 ###----------------- each virus's avg prevalence in China -------------------###
 
@@ -1348,34 +1614,39 @@ dataset_names <- ls(pattern = "^df_")
 for(ds_name in dataset_names) {
   
   data <- get(ds_name)
-  
-  if(n_distinct(data$pub_ID) < 5) {
+    if(n_distinct(data$pub_ID) < 5) {
     message(paste("Skipping", ds_name, "- less than 5 unique publications"))
     next
   }
   
   province_profile <- create_province_profile(data)
-  
   virus_name <- str_remove(ds_name, "^df_molecular_|^df_serological_")
-
   suffix <- if(str_detect(ds_name, "molecular")) "_mol" else "_sero"
-  
   new_name <- paste0("province_profile_", virus_name, suffix)
-  
   assign(new_name, province_profile)
-  
   message(paste("Created", new_name))
 }
 
 ## --------- individual maps (export) -------
 
+library(dplyr)
+library(tidyr)    
+library(stringr)  
+library(ggplot2)
+library(sf)
+library(patchwork) 
+library(ragg)      
+
 create_prevalence_map_indv <- function(province_data, china, output_directory) {
   virus_groups <- select(province_data, starts_with("average_prevalence")) %>% colnames()
+  
   map_list <- lapply(virus_groups, function(virus_group) {
     virus_name <- str_replace(virus_group, "avg_prev_", "")
+    
     virus_prevalence_df <- province_data %>%
       select(province, matches(virus_group), frequency_pub_ID, total_positive, sample_number, min_sampling_year, max_sampling_year, total_pub_ID) %>%
       rename(prevalence = !!virus_group)
+    
     china_prevalence <- china %>%
       left_join(virus_prevalence_df, by = c("province_shp" = "province"))
     
@@ -1383,7 +1654,7 @@ create_prevalence_map_indv <- function(province_data, china, output_directory) {
     total_sample_sum   <- sum(virus_prevalence_df$sample_number,   na.rm = TRUE)
     overall_min_year   <- min(province_data$min_sampling_year, na.rm = TRUE)
     overall_max_year   <- max(province_data$max_sampling_year, na.rm = TRUE)
-    num_studies <- max(virus_prevalence_df$total_pub_ID, na.rm = TRUE)
+    num_studies        <- max(virus_prevalence_df$total_pub_ID, na.rm = TRUE)
     
     label_data <- china_prevalence %>%
       mutate(
@@ -1397,10 +1668,10 @@ create_prevalence_map_indv <- function(province_data, china, output_directory) {
         )
       )
     
-    bbox <- sf::st_bbox(china)
-    xr <- bbox$xmax - bbox$xmin
-    yr <- bbox$ymax - bbox$ymin
-    x_off <- 0.975   
+    bbox  <- sf::st_bbox(china)
+    xr    <- bbox$xmax - bbox$xmin
+    yr    <- bbox$ymax - bbox$ymin
+    x_off <- 0.975
     y_off <- 0.975
     
     map_plot <- ggplot(data = china_prevalence) +
@@ -1409,7 +1680,7 @@ create_prevalence_map_indv <- function(province_data, china, output_directory) {
         option = "plasma",
         direction = -1,
         name = paste("Avg prevalence"),
-        na.value = "grey80",
+        na.value = "grey85",
         limits = c(0, 1)
       ) +
       theme(
@@ -1423,8 +1694,9 @@ create_prevalence_map_indv <- function(province_data, china, output_directory) {
         legend.margin = margin(0, 0.5, 0, 0.5, unit = "cm"),
         legend.background = element_rect(fill = NA),
         panel.background = element_rect(fill = "white", color = NA),
-        panel.grid.major = element_line(color = "grey90", size = 0.2),  
-        panel.grid.minor = element_line(color = "grey90", size = 0.2)
+        panel.grid.major = element_line(color = "grey90", size = 0.2),
+        panel.grid.minor = element_line(color = "grey90", size = 0.2),
+        text = element_text(family = "sans")  # ensure consistent font rendering in TIFF
       ) +
       annotate(
         "text",
@@ -1437,27 +1709,33 @@ create_prevalence_map_indv <- function(province_data, china, output_directory) {
         family = "sans",
         color = "black"
       )
+    
+    # Save as high-resolution TIFF with consistent rendering
     ggsave(
-      filename = file.path(output_directory, paste0("avg_prev_", dataset_name, ".png")),
+      filename = file.path(output_directory, paste0("avg_prev_", dataset_name, ".tiff")),
       plot = map_plot,
       width = 10,
       height = 8,
-      dpi = 300,
+      units = "in",
+      dpi = 600,
+      device = ragg::agg_tiff,
+      compression = "lzw",
       bg = "white"
     )
+    
     return(map_plot)
   })
   
   combined_maps <- wrap_plots(map_list, ncol = 2) +
     plot_layout(guides = "collect") &
-    theme(legend.position = "bottom")
+    theme(legend.position = "bottom", text = element_text(family = "sans"))
   
   return(combined_maps)
 }
 
 ## --- export 
 
-output_directory <- "figures/avg_prev"
+output_directory <- "figures/avg_prev_TIFF"
 dir.create(output_directory, recursive = TRUE, showWarnings = FALSE)
 
 dataset_names <- ls(pattern = "^df_")
@@ -1470,6 +1748,7 @@ for (dataset_name in dataset_names) {
     individual_map <- create_prevalence_map_indv(province_profile, china, output_directory)
   }}
 
+
 ##--------------- Function to create individual virus maps for patchwork
 
 library(dplyr)
@@ -1478,11 +1757,11 @@ library(sf)
 library(patchwork)
 library(stringr)
 library(viridis)
+library(ragg) 
 
 create_prevalence_maps <- function(province_data, china, dataset_name = NULL) {
-  
   # Use provided dataset_name or fallback to object name
-  if(is.null(dataset_name)) {
+  if (is.null(dataset_name)) {
     dataset_name <- deparse(substitute(province_data))
   }
   
@@ -1492,7 +1771,7 @@ create_prevalence_maps <- function(province_data, china, dataset_name = NULL) {
     str_remove("_mol$|_sero$")
   
   # Determine study type for title
-  study_type <- if(str_detect(dataset_name, "_mol$")) "Molecular" else "Serological"
+  study_type <- if (str_detect(dataset_name, "_mol$")) "Molecular" else "Serological"
   
   # Append to title
   full_title <- paste0(virus_name, " (", study_type, ")")
@@ -1502,18 +1781,17 @@ create_prevalence_maps <- function(province_data, china, dataset_name = NULL) {
     select(starts_with("average_prevalence")) %>%
     colnames()
   
-  if(length(virus_groups) == 0) {
+  if (length(virus_groups) == 0) {
     warning(paste("No columns starting with 'average_prevalence' found in", dataset_name))
     return(list())
   }
   
   map_list <- lapply(virus_groups, function(virus_group) {
-    
     virus_prevalence_df <- province_data %>%
       select(province, matches(virus_group), frequency_pub_ID, total_positive, sample_number, min_sampling_year, max_sampling_year, total_pub_ID) %>%
       rename(prevalence = !!virus_group)
     
-    if(nrow(virus_prevalence_df) == 0) return(NULL)
+    if (nrow(virus_prevalence_df) == 0) return(NULL)
     
     china_prevalence <- china %>%
       left_join(virus_prevalence_df, by = c("province_shp" = "province"))
@@ -1522,7 +1800,7 @@ create_prevalence_maps <- function(province_data, china, dataset_name = NULL) {
     total_sample_sum   <- sum(virus_prevalence_df$sample_number, na.rm = TRUE)
     overall_min_year   <- min(province_data$min_sampling_year, na.rm = TRUE)
     overall_max_year   <- max(province_data$max_sampling_year, na.rm = TRUE)
-    num_studies <- max(virus_prevalence_df$total_pub_ID, na.rm = TRUE)
+    num_studies        <- max(virus_prevalence_df$total_pub_ID, na.rm = TRUE)
     
     label_text <- paste0(
       "Number of studies: ", num_studies, "\n",
@@ -1531,32 +1809,31 @@ create_prevalence_maps <- function(province_data, china, dataset_name = NULL) {
       "Period: ", overall_min_year, "-", overall_max_year
     )
     
-    # Create the map with custom legend length
     ggplot(china_prevalence) +
       geom_sf(aes(fill = prevalence), color = "black", size = 0.2) +
       scale_fill_viridis_c(
         option = "plasma",
         direction = -1,
         name = "Average prevalence  ",
-        na.value = "grey80",
+        na.value = "grey85",
         limits = c(0, 1),
-        guide = guide_colorbar(barwidth = 15) 
+        guide = guide_colorbar(barwidth = 15)
       ) +
-      theme_minimal(base_family = "sans") +
+      # Set base_family and base_size for consistent TIFF text rendering
+      theme_minimal(base_family = "sans", base_size = 12) +
       theme(
         legend.position = "bottom",
         legend.title = element_text(size = 12),
-        legend.text = element_text(size = 12),
-        plot.title = element_text(size = 12),
-        plot.subtitle = element_text(size = 12),
-        panel.grid = element_line(color = "grey90", size = 0.2)
+        legend.text  = element_text(size = 12),
+        plot.title   = element_text(size = 12),
+        plot.subtitle= element_text(size = 12),
+        panel.grid   = element_line(color = "grey90", size = 0.2)
       ) +
       labs(title = full_title, subtitle = label_text)
   })
   
   # Remove NULL maps
   map_list <- map_list[!sapply(map_list, is.null)]
-  
   return(map_list)
 }
 
@@ -1576,6 +1853,8 @@ dataset_list <- c(
   "province_profile_PRV_sero"
 )
 
+china <- load_shapefile()
+
 all_maps <- lapply(dataset_list, function(ds) {
   create_prevalence_maps(get(ds), china, dataset_name = ds)
 })
@@ -1584,17 +1863,25 @@ all_maps <- lapply(dataset_list, function(ds) {
 all_maps <- unlist(all_maps, recursive = FALSE)
 all_maps <- all_maps[!sapply(all_maps, is.null)]
 
-if(length(all_maps) == 0) {
+if (length(all_maps) == 0) {
   stop("No valid maps were generated. Check your data and column names!")
 }
 
 # ------- Combine all maps into a single patchwork
-combined_maps <- wrap_plots(all_maps, ncol = 4) +
+combined_maps <- wrap_plots(all_maps, ncol = 3) +
   plot_annotation(tag_levels = "A") +
   plot_layout(guides = "collect") &
-  theme(legend.position = "bottom")
+  theme(legend.position = "bottom", text = element_text(family = "sans"))
 
 print(combined_maps)
 
-ggsave("figures/Figure_8_avg_prev_maps.png",
-       combined_maps, width = 22, height = 16, dpi = 300)
+# Export
+ggsave(
+  filename = "figures/Figure_9_avg_prev_maps.tiff",
+  plot = combined_maps,
+  width = 18, height = 22, units = "in",
+  dpi = 600,
+  device = ragg::agg_tiff,
+  compression = "lzw",
+  bg = "white"
+)
