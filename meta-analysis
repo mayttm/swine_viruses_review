@@ -1,18 +1,18 @@
 ###----------------------- META-ANALYSIS ------------------------------------###
 
-#packages <- c("metafor", "dplyr", "stringr")
+# packages <- c("metafor", "dplyr", "stringr")
 installed <- rownames(installed.packages())
 if (length(setdiff(packages, installed)) > 0) {
-  install.packages(setdiff(packages, installed)) }
+  install.packages(setdiff(packages, installed))
+}
 
 dataset_names <- ls(pattern = "^df_")
-
 library(meta)
 library(dplyr)
 library(stringr)
+library(ragg)
 
 for (dataset_name in dataset_names) {
-  
   data <- get(dataset_name)
   
   # Filter studies with at least 30 samples
@@ -60,35 +60,39 @@ for (dataset_name in dataset_names) {
   # Zebra-style shading by pub_ID
   shade_groups <- as.numeric(factor(data$pub_ID)) %% 2 != 0
   
-  # Dynamic font & margin scaling
-  n_studies <- nrow(data)
-  cex_value <- min(0.9, 800 / n_studies + 20)     
+  # Dynamic font & margin scaling (kept the same)
+  n_studies  <- nrow(data)
+  cex_value  <- min(0.9, 800 / n_studies + 20)
   mar_bottom <- max(2, 2 + n_studies * 0.1) # Bottom margin if many studies
-  mar_left <- max(1, 1 + n_studies * 0.05) # Extra margin for added columns
+  mar_left   <- max(1, 1 + n_studies * 0.05) # Extra margin for added columns
   
-  png_width <- 4000                           
-  png_height <- max(2800, n_studies * 100) 
+  # Figure dimensions (pixels) — unchanged to preserve layout, switch device to TIFF
+  tiff_width  <- 4000
+  tiff_height <- max(2800, n_studies * 100)
   
-  png(
-    filename = paste0("figures/forest/forest_", dataset_name, ".png"),
-    width = png_width,
-    height = png_height,
-    res = 300
+  # High-quality TIFF device; keep res=300 to maintain PNG-like sizing
+  ragg::agg_tiff(
+    filename = paste0("figures/forest/forest_", dataset_name, ".tiff"),
+    width = tiff_width,
+    height = tiff_height,
+    units = "px",
+    res = 300,
+    compression = "lzw",
+    background = "white"
   )
   
+  # Ensure consistent font family for TIFF
+  par(family = "sans")
   par(mar = c(mar_bottom, mar_left, 6, 10))  # bottom, left, top, right
   
   forest(
     meta_res,
     sortvar = data$sampling_year,
     smlab = "",
-    
     leftcols = c("studlab", "diag_test_details", "sampling_year", "n"),
     leftlabs = c("Study", "Diagnostic Test", "Sampling Year", "Sample Size"),
-    
     rightcols = c("effect", "ci", "w.random"),
     rightlabs = c("Prevalence", "95% CI", "Weight"),
-    
     # Model settings
     comb.fixed = TRUE,
     comb.random = TRUE,
@@ -99,7 +103,6 @@ for (dataset_name in dataset_names) {
     col.diamond.fixed = "darkorange",
     col.diamond.random = "red",
     col.diamond.lines = "black",
-    
     # Zebra shading
     shade = shade_groups,
     print.tau2 = TRUE,
@@ -108,13 +111,12 @@ for (dataset_name in dataset_names) {
     xlim = c(0, 1),
     just = "center",
     cex = cex_value,
-    cex.lab = cex_value, 
+    cex.lab = cex_value,
     colgap.forest.left = "2cm",
     spacing = 1.15
   )
   
   dev.off()
-  
   message(paste0("✅ Forest plot created for ", dataset_name, " (", n_studies, " studies)"))
 }
 
@@ -125,9 +127,9 @@ library(meta)
 library(dplyr)
 library(tidyr)
 library(stringr)
+library(ragg)
 
 pooled_results <- list()
-
 dataset_names <- ls(pattern = "^df_")
 
 for (dataset_name in dataset_names) {
@@ -185,10 +187,9 @@ for (dataset_name in dataset_names) {
       return(NULL)
     }
   )
-  
   if (is.null(meta_res)) next
   
-  # Perform Begg's rank correlation test (publication bias)
+  # Perform Begg's and Egger's tests
   begg_pval <- tryCatch({
     begg_test <- metabias(meta_res, method = "rank")
     as.numeric(begg_test$p.value)
@@ -196,7 +197,6 @@ for (dataset_name in dataset_names) {
     message(paste0("⚠ Begg's test failed for ", dataset_name))
     return(NA)
   })
-  
   egger_pval <- tryCatch({
     egger_test <- metabias(meta_res, method = "linreg")
     as.numeric(egger_test$p.value)
@@ -242,7 +242,6 @@ for (dataset_name in dataset_names) {
 
 # Combine all pooled results into one dataframe
 pooled_results_df <- do.call(rbind, pooled_results)
-
 pooled_results_df$CleanName  <- str_replace(pooled_results_df$Dataset, "^df_", "")
 pooled_results_df$Diagnostic <- str_extract(pooled_results_df$CleanName, "^[^_]+")
 pooled_results_df <- pooled_results_df %>%
@@ -255,15 +254,26 @@ pooled_results_df <- pooled_results_df %>%
 pooled_results_df$NumStudies <- pooled_results_df$NumStudies
 pooled_results_df$NumSamples <- pooled_results_df$TotalSampleSize
 
+# Sort in descending order of pooled prevalence (random-effects estimate)
+pooled_results_df <- pooled_results_df %>%
+  arrange(desc(PooledPrev_Random))
+
+pooled_results_df <- pooled_results_df %>%
+  filter(tolower(Diagnostic) != "serological")
+
 write.csv(pooled_results_df, file = "pooled_prevalence_summary_PR.csv", row.names = FALSE)
 
 studies_fmt <- pooled_results_df$NumStudies
 samples_fmt <- format(pooled_results_df$NumSamples, big.mark=",")
 
-# Forest plot with zebra shading
-png("figures/forest_pooled_prevalence_PR.png", width = 4000, height = 2800, res = 300)
+ragg::agg_tiff(
+  "figures/Figure_10_pooled_prev.tiff",
+  width = 12, height = 8, units = "in",
+  res = 300, compression = "lzw", background = "white"
+)
 
 # add more space on the right for the annotation column
+par(family = "sans")            # consistent text rendering in TIFF
 par(mar = c(4, 6, 4, 4))
 
 x_est  <- 1.25                   # "Estimate [95% CI]" column
@@ -271,8 +281,8 @@ x_i2   <- 1.60                   # I^2 column
 x_tau2 <- 1.80                   # Tau^2 column
 x_begg <- 2.00
 x_egg  <- 2.20
-x_left <- c(-0.7, -0.5, -0.3)  # Diagnostic, Studies, Samples
-xlim   <- c(min(x_left)-0.4, 2.35) # change the space between virus and columns labels
+x_left <- c(-0.7, -0.5, -0.3)    # Diagnostic, Studies, Samples
+xlim   <- c(min(x_left)-0.4, 2.35)
 
 k    <- nrow(pooled_results_df)
 rows <- k:1  # explicit row positions
@@ -301,20 +311,21 @@ forest(
   cex     = 1,
   spacing = 0.8,
   shade   = TRUE,
-  annotate = FALSE,
+  annotate = FALSE
 )
 
 # Column headers for the left-side info columns
 text(x = x_left + 0.15, y = max(rows) + 2, labels = c("Diagnostic", "Studies", "Samples"),
      cex = 0.9, font = 2)
-text(x = c(x_est, x_i2, x_tau2, x_begg, x_egg) , y = max(rows) + 2,
-     labels = c("Pooled Prevalence [95% CI]", "I²", "Tau²", "Begg's", "Egger's p-val"), cex = 0.85, font = 2, adj = 0.5)
+text(x = c(x_est, x_i2, x_tau2, x_begg, x_egg), y = max(rows) + 2,
+     labels = c("Pooled Prevalence [95% CI]", "I²", "Tau²", "Begg's", "Egger's p-val"),
+     cex = 0.85, font = 2, adj = 0.5)
 
-text(x = x_est,  y = rows, labels = est_lab,                           cex = 1, adj = 0.5)
-text(x = x_i2,   y = rows, labels = sprintf("%.3f", pooled_results_df$I2),   cex = 1, adj = 0.5)
-text(x = x_tau2, y = rows, labels = sprintf("%.3f", pooled_results_df$Tau2), cex = 1, adj = 0.5)
+text(x = x_est,  y = rows, labels = est_lab,                                 cex = 1,   adj = 0.5)
+text(x = x_i2,   y = rows, labels = sprintf("%.3f", pooled_results_df$I2),   cex = 1,   adj = 0.5)
+text(x = x_tau2, y = rows, labels = sprintf("%.3f", pooled_results_df$Tau2), cex = 1,   adj = 0.5)
 text(x = x_begg, y = rows, labels = sprintf("%.3f", pooled_results_df$Begg_Pval), cex = 1, adj = 0.5)
-text(x = x_egg, y = rows, labels = sprintf("%.3f", pooled_results_df$Egger_Pval), cex = 1, adj = 0.5)
+text(x = x_egg,  y = rows, labels = sprintf("%.3f", pooled_results_df$Egger_Pval), cex = 1, adj = 0.5)
 
 # Dashed vertical reference line
 segments(x0 = 0.5, y0 = min(rows) - 0.5, x1 = 0.5, y1 = max(rows) + 0.5,
@@ -381,7 +392,7 @@ for (dataset_name in dataset_names) {
   n_studies <- nrow(data)
   png_width <- 4000
   png_height <- max(2800, n_studies * 50)  # 50 px per study
-  png_filename <- paste0("figures/funnel/Egger's Test/egger_", dataset_name, ".png")
+  png_filename <- paste0("figures/funnel/Egger's Test/egger_", dataset_name, ".tiff")
   
   png(filename = png_filename, width = png_width, height = png_height, res = 300)
   
@@ -482,7 +493,7 @@ for (dataset_name in dataset_names) {
   n_studies <- nrow(data)
   png_width <- 4000
   png_height <- max(2800, n_studies * 50)  # 50 px per study
-  png_filename <- paste0("figures/funnel/Begg's Rank/begg_", dataset_name, ".png")
+  png_filename <- paste0("figures/funnel/Begg's Rank/begg_", dataset_name, ".tiff")
   
   png(filename = png_filename, width = png_width, height = png_height, res = 300)
   
