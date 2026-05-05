@@ -1,0 +1,571 @@
+### ======================================================================== ###
+#####------------------------- SURVEILLANCE DATA---------------------------#####
+
+# Load required libraries
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(grid)
+library(gridExtra)
+library(ggrepel)  # ADD THIS
+library(scales)   # ADD THIS
+
+################################################################################
+#                      1. DATA LOADING & EXPLORATION                           #
+################################################################################
+
+# Load the data
+data <- read.csv("data/data_surv_single_summary.csv", stringsAsFactors = FALSE)
+
+# Display basic structure
+cat("====== DATA STRUCTURE ======\n")
+str(data)
+cat("\n====== DATA DIMENSIONS ======\n")
+cat("Rows:", nrow(data), "\n")
+cat("Columns:", ncol(data), "\n")
+cat("\n====== COLUMN NAMES ======\n")
+print(colnames(data))
+cat("\n====== FIRST FEW ROWS ======\n")
+print(head(data))
+cat("\n====== DATA SUMMARY ======\n")
+print(summary(data))
+cat("\n====== MISSING VALUES ======\n")
+missing_summary <- data.frame(
+  Variable = colnames(data),
+  Missing_Count = colSums(is.na(data)),
+  Missing_Percent = round(colSums(is.na(data)) / nrow(data) * 100, 2)
+)
+print(missing_summary)
+
+################################################################################
+#                      2. DATA ORGANIZATION & CLEANING                         #
+################################################################################
+
+# Create a working copy
+data_clean <- data
+
+# -------- MAIN VIRUS --------
+specified_viruses <- c("HEV", "SIV", "PEDV", "PRRSV", "PRV", "PDCoV",
+                       "AIV", "PCV3", "PCV2", "PCV4", "PCLV", "Multiple")
+if("main_virus" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(main_virus_clean = ifelse(main_virus %in% specified_viruses,
+                                     main_virus,
+                                     "Other"))
+  cat("\n====== MAIN VIRUS FREQUENCIES (ORIGINAL) ======\n")
+  print(table(data_clean$main_virus, useNA = "ifany"))
+  cat("\n====== MAIN VIRUS FREQUENCIES (CLEANED) ======\n")
+  print(table(data_clean$main_virus_clean, useNA = "ifany"))
+}
+
+# -------- REGION --------
+if("region" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(region_clean = str_trim(region))
+  cat("\n====== REGION FREQUENCIES ======\n")
+  print(table(data_clean$region_clean, useNA = "ifany"))
+}
+
+# -------- PUBLICATION YEAR --------
+if("pub_year" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(pub_year_clean = as.numeric(pub_year))
+  cat("\n====== PUBLICATION YEAR FREQUENCIES ======\n")
+  print(table(data_clean$pub_year_clean, useNA = "ifany"))
+}
+
+# -------- PIG TYPE --------
+if("pig_type" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(
+      pig_type_clean = str_trim(pig_type),
+      pig_type_clean = ifelse(is.na(pig_type_clean) | pig_type_clean == "", 
+                              "Not Reported", 
+                              pig_type_clean),
+      pig_type_clean = case_when(
+        tolower(pig_type_clean) == "multiple" ~ "Multiple",
+        tolower(pig_type_clean) == "piglet" ~ "Suckling pig",
+        tolower(pig_type_clean) == "fattening_pig" ~ "Fattening pig",
+        tolower(pig_type_clean) == "nursery_pig" ~ "Nursery pig",
+        tolower(pig_type_clean) == "boar" ~ "Boar",
+        tolower(pig_type_clean) == "sow" ~ "Sow",
+        TRUE ~ pig_type_clean
+      )
+    )
+  cat("\n====== PIG TYPE FREQUENCIES ======\n")
+  print(table(data_clean$pig_type_clean, useNA = "ifany"))
+}
+
+# -------- SAMPLE TYPE --------
+sample_cols <- grep("^sample_", colnames(data_clean), value = TRUE)
+sample_cols <- sample_cols[!sample_cols %in% c("sample_healthy", "sample_diseased", "sample_type", "sample_size")]
+cat("\n====== SAMPLE TYPE COLUMNS FOUND ======\n")
+print(sample_cols)
+
+if(length(sample_cols) > 0) {
+  sample_summary <- data_clean %>%
+    select(all_of(sample_cols)) %>%
+    summarise(across(everything(), ~sum(. == 1 | . == "1" | tolower(.) == "yes", na.rm = TRUE)))
+  cat("\n====== SAMPLE TYPE FREQUENCIES ======\n")
+  print(t(sample_summary))
+}
+
+# -------- HEALTH STATUS --------
+if("health_status" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(
+      health_status_clean = str_trim(health_status),
+      health_status_clean = ifelse(is.na(health_status_clean) | health_status_clean == "", 
+                                   "Not Reported", 
+                                   health_status_clean),
+      health_status_clean = case_when(
+        tolower(health_status_clean) == "diseased" ~ "Diseased pig",
+        tolower(health_status_clean) == "healthy" ~ "Healthy pig",
+        tolower(health_status_clean) == "healthy_diseased" ~ "Mix of Healthy and Diseased pigs",
+        TRUE ~ health_status_clean
+      )
+    )
+  cat("\n====== HEALTH STATUS FREQUENCIES ======\n")
+  print(table(data_clean$health_status_clean, useNA = "ifany"))
+}
+
+# -------- DIAGNOSTIC TYPE --------
+if("diag_type" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(
+      diag_type_clean = str_trim(diag_type),
+      diag_type_clean = str_replace_all(diag_type_clean, "_", " "),
+      diag_type_clean = str_to_title(diag_type_clean),
+      diag_type_clean = ifelse(is.na(diag_type_clean) | diag_type_clean == "", 
+                               "Not Reported", 
+                               diag_type_clean)
+    )
+  cat("\n====== DIAGNOSTIC TYPE FREQUENCIES ======\n")
+  print(table(data_clean$diag_type_clean, useNA = "ifany"))
+}
+
+################################################################################
+#                      3. IMPROVED VISUALIZATION FUNCTIONS                     #
+################################################################################
+
+# Function to create donut chart without labels
+create_donut_chart <- function(data, var_name, title) {
+  # Prepare data
+  plot_data <- data %>%
+    mutate(!!sym(var_name) := ifelse(is.na(!!sym(var_name)), "Not Reported", as.character(!!sym(var_name)))) %>%
+    count(!!sym(var_name)) %>%
+    arrange(desc(n)) %>%
+    mutate(
+      percentage = n / sum(n) * 100,
+      !!sym(var_name) := factor(!!sym(var_name), levels = !!sym(var_name))
+    )
+  
+  # Create plot without any labels
+  p <- ggplot(plot_data, aes(x = 2, y = n, fill = !!sym(var_name))) +
+    geom_bar(stat = "identity", width = 1, color = "white", size = 0.8) +
+    coord_polar(theta = "y", start = 0) +
+    xlim(0.5, 2.5) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 13, face = "bold",
+                                margin = margin(b = 10)),
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      legend.position = "right",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 8.5),
+      legend.key.size = unit(0.7, "cm"),
+      legend.background = element_rect(fill = "white", color = NA),
+      plot.margin = margin(10, 5, 10, 5) ,
+      aspect.ratio = 1
+    ) +
+    labs(title = title) +
+    scale_fill_manual(
+      values = colorRampPalette(c("#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072",
+                                  "#80B1D3", "#FDB462", "#B3DE69", "#FCCDE5",
+                                  "#D9D9D9", "#BC80BD", "#CCEBC5", "#FFED6F"))(
+                                    nrow(plot_data)),
+      labels = function(x) {
+        idx <- match(x, plot_data[[var_name]])
+        paste0(str_wrap(x, 20), " (",
+               sprintf("%.1f%%", plot_data$percentage[idx]), ")")
+      }
+    )
+  
+  return(p)
+}
+
+create_virus_donut_chart <- function(data, var_name, title) {
+  # Prepare data
+  plot_data <- data %>%
+    mutate(!!sym(var_name) := ifelse(is.na(!!sym(var_name)), "Not Reported", as.character(!!sym(var_name)))) %>%
+    count(!!sym(var_name)) %>%
+    arrange(desc(n)) %>%
+    mutate(
+      percentage = n / sum(n) * 100,
+      !!sym(var_name) := factor(!!sym(var_name), levels = !!sym(var_name))
+    )
+  
+  # Use pathogen_colors for viruses
+  virus_names <- as.character(plot_data[[var_name]])
+  fill_colors <- pathogen_colors[virus_names]
+  # For any viruses not in pathogen_colors, assign a default color
+  fill_colors[is.na(fill_colors)] <- "grey67"
+  names(fill_colors) <- virus_names
+  
+  # Create plot without any labels
+  p <- ggplot(plot_data, aes(x = 2, y = n, fill = !!sym(var_name))) +
+    geom_bar(stat = "identity", width = 1, color = "white", size = 0.8) +
+    coord_polar(theta = "y", start = 0) +
+    xlim(0.5, 2.5) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 13, face = "bold",
+                                margin = margin(b = 10)),
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      legend.position = "right",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 8.5),
+      legend.key.size = unit(0.7, "cm"),
+      legend.background = element_rect(fill = "white", color = NA),
+      plot.margin = margin(10, 5, 10, 5),
+      aspect.ratio = 1
+    ) +
+    labs(title = title) +
+    scale_fill_manual(
+      values = fill_colors,
+      labels = function(x) {
+        idx <- match(x, plot_data[[var_name]])
+        paste0(str_wrap(x, 20), " (",
+               sprintf("%.1f%%", plot_data$percentage[idx]), ")")
+      }
+    )
+  
+  return(p)
+}
+
+create_sample_type_chart <- function(data, sample_cols, title) {
+  sample_summary <- data %>%
+    select(all_of(sample_cols)) %>%
+    summarise(across(everything(), ~sum(. == 1 | . == "1" | tolower(.) == "yes", na.rm = TRUE))) %>%
+    pivot_longer(everything(), names_to = "sample_type", values_to = "count") %>%
+    arrange(desc(count)) %>%
+    mutate(
+      sample_type = str_replace(sample_type, "^sample_", ""),
+      sample_type = str_to_title(str_replace_all(sample_type, "_", " ")),
+      # Change "intes" to "intestine"
+      sample_type = ifelse(tolower(sample_type) == "intes", "Intestine", sample_type),
+      percentage = count / nrow(data) * 100,
+      sample_type = factor(sample_type, levels = sample_type)
+    )
+  
+  p <- ggplot(sample_summary, aes(x = 2, y = count, fill = sample_type)) +
+    geom_bar(stat = "identity", width = 1, color = "white", size = 0.8) +
+    coord_polar(theta = "y", start = 0) +
+    xlim(0.5, 2.5) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 13, face = "bold",
+                                margin = margin(b = 10)),
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      legend.position = "right",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 8.5),
+      legend.key.size = unit(0.7, "cm"),
+      legend.background = element_rect(fill = "white", color = NA),
+      plot.caption = element_text(size = 7.5, hjust = 0.5, color = "gray40",
+                                  margin = margin(t = 5)),
+      plot.margin = margin(10, 5, 10, 5) ,
+      aspect.ratio = 1
+    ) +
+    labs(title = title,
+         caption = "Note: Non-mutually exclusive categories") +
+    scale_fill_manual(
+      values = colorRampPalette(c("#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072",
+                                  "#80B1D3", "#FDB462", "#B3DE69"))(
+                                    nrow(sample_summary)),
+      labels = function(x) {
+        idx <- match(x, sample_summary$sample_type)
+        paste0(str_wrap(x, 20), " (",
+               sprintf("%.1f%%", sample_summary$percentage[idx]), ")")
+      }
+    )
+  
+  return(p)
+}
+
+# Function to create improved publication year bar chart
+create_pub_year_bar <- function(data, var_name, title) {
+  
+  plot_data <- data %>%
+    filter(!is.na(!!sym(var_name))) %>%
+    count(!!sym(var_name)) %>%
+    arrange(!!sym(var_name))
+  
+  p <- ggplot(plot_data, aes(x = factor(!!sym(var_name)), y = n)) +
+    geom_bar(stat = "identity", fill = "#f78fa1", color = "white", 
+             width = 0.75, alpha = 0.9) +
+    geom_text(aes(label = n),
+              vjust = -0.4, size = 3, fontface = "bold", color = "gray20") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 13, face = "bold",
+                                margin = margin(b = 10)),
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_line(color = "gray90", size = 0.3),
+      axis.text.x = element_text(size = 9, color = "gray20"),
+      axis.text.y = element_text(size = 9, color = "gray20"),
+      axis.title = element_text(size = 10, face = "bold", color = "gray20"),
+      plot.margin = margin(15, 15, 15, 15)
+    ) +
+    labs(title = title,
+         x = "Publication Year",
+         y = "Number of Studies") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.12)))
+  
+  return(p)
+}
+
+################################################################################
+#                      4. CREATE INDIVIDUAL VISUALIZATIONS                     #
+################################################################################
+
+# Create output directory
+dir.create("figures/summary_charts", recursive = TRUE, showWarnings = FALSE)
+
+# Store plots in a list
+plot_list <- list()
+
+# 1. Main Virus
+if("main_virus_clean" %in% colnames(data_clean)) {
+  plot_list$main_virus <- create_virus_donut_chart(
+    data_clean,
+    "main_virus_clean",
+    "Main Virus Distribution"
+  )
+  ggsave("figures/summary_charts/main_virus_donut.jpg",
+         plot_list$main_virus, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: main_virus_donut.png\n")
+}
+
+# 2. Region
+if("region_clean" %in% colnames(data_clean)) {
+  plot_list$region <- create_donut_chart(
+    data_clean,
+    "region_clean",
+    "Study Region Distribution"
+  )
+  ggsave("figures/summary_charts/region_donut.jpg",
+         plot_list$region, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: region_donut.png\n")
+}
+
+# 3. Pig Type
+if("pig_type_clean" %in% colnames(data_clean)) {
+  plot_list$pig_type <- create_donut_chart(
+    data_clean,
+    "pig_type_clean",
+    "Pig Type Distribution"
+  )
+  ggsave("figures/summary_charts/pig_type_donut.jpg",
+         plot_list$pig_type, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: pig_type_donut.png\n")
+}
+
+# 4. Sample Type
+if(length(sample_cols) > 0) {
+  plot_list$sample_type <- create_sample_type_chart(
+    data_clean,
+    sample_cols,
+    "Sample Type Distribution"
+  )
+  ggsave("figures/summary_charts/sample_type_donut.jpg",
+         plot_list$sample_type, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: sample_type_donut.png\n")
+}
+
+# 5. Health Status
+if("health_status_clean" %in% colnames(data_clean)) {
+  plot_list$health_status <- create_donut_chart(
+    data_clean,
+    "health_status_clean",
+    "Health Status Distribution"
+  )
+  ggsave("figures/summary_charts/health_status_donut.jpg",
+         plot_list$health_status, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: health_status_donut.png\n")
+}
+
+# 6. Diagnostic Type
+if("diag_type_clean" %in% colnames(data_clean)) {
+  plot_list$diag_type <- create_donut_chart(
+    data_clean,
+    "diag_type_clean",
+    "Diagnostic Type Distribution"
+  )
+  ggsave("figures/summary_charts/diag_type_donut.jpg",
+         plot_list$diag_type, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: diag_type_donut.png\n")
+}
+
+# 7. Publication Year
+if("pub_year_clean" %in% colnames(data_clean)) {
+  plot_list$pub_year <- create_pub_year_bar(
+    data_clean,
+    "pub_year_clean",
+    "Publication Year Distribution"
+  )
+  ggsave("figures/summary_charts/pub_year_bar.jpg",
+         plot_list$pub_year, width = 8, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: pub_year_bar.png\n")
+}
+
+################################################################################
+#                      5. CREATE IMPROVED COMBINED PANEL                       #
+################################################################################
+
+create_combined_panel <- function(plot_list, output_file) {
+  # Filter out NULL plots
+  valid_plots <- plot_list[!sapply(plot_list, is.null)]
+  if(length(valid_plots) == 0) {
+    cat("⚠ No valid plots to combine\n")
+    return(NULL)
+  }
+  n_plots <- length(valid_plots)
+  
+  # Simple 3x3 layout
+  layout_matrix <- rbind(
+    c(1, 2),
+    c(3, 4),
+    c(5, 6),   
+    c(7, 7)   
+  )
+  heights <- c(1.5, 1, 1, 1)
+  
+  # Arrange plots
+  combined_plot <- arrangeGrob(
+    grobs = valid_plots,
+    layout_matrix = layout_matrix,
+    heights = heights
+  )
+  
+  # Fixed dimensions for 3x3 layout
+  plot_width <- 10
+  plot_height <- 14
+  
+  # Save combined plot
+  ggsave(output_file,
+         combined_plot,
+         width = plot_width,
+         height = plot_height,
+         dpi = 300,
+         bg = "white")
+  
+  cat(paste0("✅ Combined panel saved: ", output_file, "\n"))
+  cat(paste0("   Dimensions: ", plot_width, " × ", plot_height,
+             " inches (", n_plots, " plots)\n"))
+  
+  return(combined_plot)
+}
+
+# Create combined panel
+combined_panel <- create_combined_panel(
+  plot_list,
+  "figures/Figure_4_surveillance_summary.jpg"
+)
+
+combined_panel <- create_combined_panel(
+  plot_list,
+  "figures/Figure_4_surveillance_summary.tiff"
+)
+
+combined_panel <- create_combined_panel(
+  plot_list,
+  "figures/Figure_4_surveillance_summary.pdf"
+)
+
+################################################################################
+#                      6. EXPORT SUMMARY TABLES                                #
+################################################################################
+
+# Create summary statistics
+summary_list <- list()
+
+if("main_virus_clean" %in% colnames(data_clean)) {
+  summary_list$main_virus <- data_clean %>%
+    count(main_virus_clean) %>%
+    mutate(percentage = round(n / sum(n) * 100, 2)) %>%
+    arrange(desc(n))
+}
+
+if("region_clean" %in% colnames(data_clean)) {
+  summary_list$region <- data_clean %>%
+    count(region_clean) %>%
+    mutate(percentage = round(n / sum(n) * 100, 2)) %>%
+    arrange(desc(n))
+}
+
+if("pub_year_clean" %in% colnames(data_clean)) {
+  summary_list$pub_year <- data_clean %>%
+    count(pub_year_clean) %>%
+    mutate(percentage = round(n / sum(n) * 100, 2)) %>%
+    arrange(pub_year_clean)
+}
+
+if("pig_type_clean" %in% colnames(data_clean)) {
+  summary_list$pig_type <- data_clean %>%
+    count(pig_type_clean) %>%
+    mutate(percentage = round(n / sum(n) * 100, 2)) %>%
+    arrange(desc(n))
+}
+
+if("health_status_clean" %in% colnames(data_clean)) {
+  summary_list$health_status <- data_clean %>%
+    count(health_status_clean) %>%
+    mutate(percentage = round(n / sum(n) * 100, 2)) %>%
+    arrange(desc(n))
+}
+
+if("diag_type_clean" %in% colnames(data_clean)) {
+  summary_list$diag_type <- data_clean %>%
+    count(diag_type_clean) %>%
+    mutate(percentage = round(n / sum(n) * 100, 2)) %>%
+    arrange(desc(n))
+}
+
+if(length(sample_cols) > 0) {
+  summary_list$sample_type <- data_clean %>%
+    select(all_of(sample_cols)) %>%
+    summarise(across(everything(), ~sum(. == 1 | . == "1" | tolower(.) == "yes", na.rm = TRUE))) %>%
+    pivot_longer(everything(), names_to = "sample_type", values_to = "count") %>%
+    mutate(
+      sample_type = str_replace(sample_type, "^sample_", ""),
+      sample_type = str_to_title(str_replace_all(sample_type, "_", " ")),
+      percentage = round(count / nrow(data_clean) * 100, 2)
+    ) %>%
+    arrange(desc(count))
+}
+
+# Save summary tables
+if(!is.null(summary_list$main_virus))
+  write.csv(summary_list$main_virus, "figures/summary_charts/summary_main_virus.csv", row.names = FALSE)
+if(!is.null(summary_list$region))
+  write.csv(summary_list$region, "figures/summary_charts/summary_region.csv", row.names = FALSE)
+if(!is.null(summary_list$pub_year))
+  write.csv(summary_list$pub_year, "figures/summary_charts/summary_pub_year.csv", row.names = FALSE)
+if(!is.null(summary_list$pig_type))
+  write.csv(summary_list$pig_type, "figures/summary_charts/summary_pig_type.csv", row.names = FALSE)
+if(!is.null(summary_list$health_status))
+  write.csv(summary_list$health_status, "figures/summary_charts/summary_health_status.csv", row.names = FALSE)
+if(!is.null(summary_list$diag_type))
+  write.csv(summary_list$diag_type, "figures/summary_charts/summary_diag_type.csv", row.names = FALSE)
+if(!is.null(summary_list$sample_type))
+  write.csv(summary_list$sample_type, "figures/summary_charts/summary_sample_type.csv", row.names = FALSE)
+
+cat("\n✅ All summary tables exported to figures/summary_charts/\n")
