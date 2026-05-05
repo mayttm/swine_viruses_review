@@ -1,0 +1,370 @@
+## ========================================================================== ##
+## -------------------------- CO-DETECTION DATA ----------------------------- ##
+## ========================================================================== ##
+
+#library(devtools)
+#install_github("jokergoo/ComplexHeatmap")
+
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(ComplexHeatmap)
+library(ggplot2)
+
+data_coinf <- read.csv("data/data_coinfection.csv", stringsAsFactors = FALSE)
+try(Sys.setlocale("LC_ALL", "en_US.UTF-8"), silent = TRUE)
+
+data_coinf <- data_coinf %>%
+  mutate(across(where(is.character), ~ enc2utf8(.)))
+
+data_coinf <- data_coinf %>%
+  filter(province != "Multiple")
+
+# Clean and standardize virus names
+data_coinf <- data_coinf %>%
+  mutate(across(virus_1:virus_4, ~ str_squish(.) %>% na_if(""))) %>%
+  # Combine TTSuV1 and TTSuV2 into TTSuV
+  mutate(across(virus_1:virus_4, ~ case_when(
+    . %in% c("TTSuV1", "TTSuV2") ~ "TTSuV",
+    TRUE ~ .
+  ))) %>%
+  # Combine PPV2, PPV6, PPV7 into PPV
+  mutate(across(virus_1:virus_4, ~ case_when(
+    . %in% c("PPV2", "PPV6", "PPV7") ~ "PPV",
+    TRUE ~ .
+  )))
+
+# After combining, we need to remove duplicates within each row
+# (e.g., if someone had both TTSuV1 and TTSuV2, now they have TTSuV twice)
+data_coinf <- data_coinf %>%
+  rowwise() %>%
+  mutate(
+    # Get unique viruses for each row
+    unique_viruses = list(unique(na.omit(c_across(virus_1:virus_4)))),
+    unique_viruses = list(unique_viruses[unique_viruses != ""]),
+    # Reassign to virus columns
+    virus_1 = ifelse(length(unique_viruses) >= 1, unique_viruses[[1]], NA_character_),
+    virus_2 = ifelse(length(unique_viruses) >= 2, unique_viruses[[2]], NA_character_),
+    virus_3 = ifelse(length(unique_viruses) >= 3, unique_viruses[[3]], NA_character_),
+    virus_4 = ifelse(length(unique_viruses) >= 4, unique_viruses[[4]], NA_character_)
+  ) %>%
+  ungroup() %>%
+  select(-unique_viruses)
+
+# Now create coinfection_group with cleaned data
+data_coinf <- data_coinf %>%
+  mutate(across(virus_1:virus_4, ~ str_squish(.) %>% na_if(""))) %>%
+  unite("coinfection_group", virus_1:virus_4, sep = "_", na.rm = TRUE,
+        remove = FALSE) %>%
+  mutate(
+    coinfection_group = gsub("_{2,}", "_", coinfection_group),
+    coinfection_group = gsub("^_|_$", "", coinfection_group)
+  ) %>%
+  filter(coinfection_group != "")
+
+###---- summarize data -----
+coinf_unique_pub_ID <- data_coinf %>% distinct(pub_ID) %>% nrow()
+coinf_pub_ID_frequency <- data_coinf %>%
+  filter(!is.na(pub_ID), pub_ID != "") %>%
+  count(pub_ID, name = "frequency") %>%
+  arrange(desc(frequency))
+
+coinf_top5_viruses <- data_coinf %>%
+  select(virus_1:virus_4) %>%
+  pivot_longer(everything(), names_to = "virus_col", values_to = "virus") %>%
+  mutate(virus = stringr::str_squish(virus)) %>%
+  filter(!is.na(virus), virus != "") %>%
+  count(virus, name = "frequency") %>%
+  arrange(desc(frequency)) %>%
+  slice_head(n = 5)
+
+coinf_top5_coinf_group <- data_coinf %>%
+  filter(!is.na(coinfection_group), coinfection_group != "") %>%
+  count(coinfection_group, name = "frequency") %>%
+  arrange(desc(frequency)) %>%
+  mutate(percent = frequency / sum(frequency)) %>%
+  slice_head(n = 5)
+
+coinf_unique_pub_ID
+head(coinf_pub_ID_frequency, 10)
+coinf_top5_viruses
+coinf_top5_coinf_group
+
+## ------------------------ PREPARING PROFILE DATA -------------------------- ##
+coinf_province_coinf_year <- data_coinf %>%
+  group_by(province, coinfection_group, sampling_year) %>%
+  summarise(
+    sample_number = sum(sample_size, na.rm = TRUE),
+    total_positive = sum(positive_sample, na.rm = TRUE),
+    prevalence = ifelse(sample_number > 0, total_positive / sample_number, NA),
+    .groups = "drop"
+  )
+
+coinf_province_coinf_summary <- coinf_province_coinf_year %>%
+  mutate(
+    year_prev = paste0(sampling_year, "(", round(prevalence * 100, 1), "%)")
+  ) %>%
+  group_by(province, coinfection_group) %>%
+  summarise(
+    coinfection_profile = paste(year_prev, collapse = ", "),
+    .groups = "drop"
+  )
+
+coinf_province_coinf_wide <- coinf_province_coinf_summary %>%
+  pivot_wider(
+    id_cols = province,
+    names_from = coinfection_group,
+    values_from = coinfection_profile,
+    values_fill = "No data"
+  )
+
+coinf_province_coinf_stats <- data_coinf %>%
+  group_by(province) %>%
+  summarise(
+    total_coinfection_types = n_distinct(coinfection_group),
+    total_coinfection_cases = sum(positive_sample, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+coinf_province_coinf_profile <- coinf_province_coinf_stats %>%
+  left_join(coinf_province_coinf_wide, by = "province")
+
+write_excel_csv(coinf_province_coinf_profile,
+                "arcgis/gis_data/arcgis_province_coinfection_year.csv")
+
+## -------------------------- SUMMARY TABLE --------------------------------- ##
+
+# Create pathogen detected column by concatenating virus_1 through virus_4
+data_coinf_summary <- data_coinf %>%
+  mutate(
+    main_pathogen = virus_1,
+    pathogens_detected = paste(
+      na.omit(c_across(virus_1:virus_4)), 
+      collapse = ", "
+    )
+  ) %>%
+  rowwise() %>%
+  mutate(
+    pathogens_detected = paste(
+      na.omit(c(virus_1, virus_2, virus_3, virus_4)), 
+      collapse = ", "
+    )
+  ) %>%
+  ungroup()
+
+# Select and export the requested columns
+summary_table <- data_coinf_summary %>%
+  select(
+    pub_ID,
+    pub_year,
+    study_type,
+    region,
+    health_status,
+    pig_type,
+    main_pathogen,
+    pathogens_detected,
+    diag_type,
+    sample_size
+  )
+
+# Export to CSV
+write_csv(summary_table, "output/coinfection_summary_table.csv")
+
+# Create table with unique pathogens for each pub_ID
+pathogen_by_pubID <- data_coinf %>%
+  select(pub_ID, virus_1, virus_2, virus_3, virus_4) %>%
+  pivot_longer(cols = virus_1:virus_4, 
+               names_to = "virus_col", 
+               values_to = "pathogen") %>%
+  filter(!is.na(pathogen), pathogen != "") %>%
+  group_by(pub_ID) %>%
+  summarise(
+    detected_pathogens = paste(unique(pathogen), collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  arrange(pub_ID)
+
+# View the table
+print(pathogen_by_pubID)
+
+# Export to CSV
+write_csv(pathogen_by_pubID, "output/coinfection_by_pubID.csv")
+
+## -------------------------- UPSET PLOT ------------------------------------ ##
+
+# Function to create paneled UpSet plots for dual, triple, and quadruple infections
+create_coinfection_panel <- function(data_coinf) {
+  
+  library(ComplexHeatmap)
+  library(grid)
+  
+  # Prepare typed data
+  data_coinf_typed <- data_coinf %>%
+    rowwise() %>%
+    mutate(
+      viruses = list(na.omit(str_squish(c_across(virus_1:virus_4)))),
+      viruses = list(viruses[viruses != ""]),
+      n_viruses = length(viruses),
+      infection_type = case_when(
+        n_viruses == 2 ~ "Dual",
+        n_viruses == 3 ~ "Triple",
+        n_viruses == 4 ~ "Quadruple",
+        TRUE ~ "Other"
+      )
+    ) %>%
+    ungroup()
+  
+  # Create list to store plots
+  plot_list <- list()
+  
+  # Generate plots for each type
+  for (type in c("Dual", "Triple", "Quadruple")) {
+    virus_list_type <- data_coinf_typed %>%
+      filter(infection_type == type) %>%
+      pull(viruses)
+    
+    if (length(virus_list_type) > 0) {
+      # Create binary matrix
+      all_viruses_type <- unique(unlist(virus_list_type))
+      upset_matrix_type <- matrix(0, nrow = length(virus_list_type), ncol = length(all_viruses_type))
+      colnames(upset_matrix_type) <- all_viruses_type
+      
+      for (i in seq_along(virus_list_type)) {
+        upset_matrix_type[i, virus_list_type[[i]]] <- 1
+      }
+      
+      m_type <- make_comb_mat(upset_matrix_type)
+      
+      # Create UpSet plot
+      upset_plot_type <- UpSet(
+        m_type,
+        set_order = order(set_size(m_type), decreasing = TRUE),
+        comb_order = order(comb_size(m_type), decreasing = TRUE),
+        top_annotation = HeatmapAnnotation(
+          "Intersection Size" = anno_barplot(
+            comb_size(m_type),
+            border = FALSE,
+            gp = gpar(fill = "#1F78B4"),
+            height = unit(2.5, "cm"),
+            add_numbers = TRUE,
+            numbers_gp = gpar(fontsize = 8, col = "black")
+          ),
+          annotation_name_side = "left",
+          annotation_name_rot = 90,
+          annotation_name_gp = gpar(fontsize = 9)
+        ),
+        right_annotation = rowAnnotation(
+          "Set Size" = anno_barplot(
+            set_size(m_type),
+            border = FALSE,
+            gp = gpar(fill = "#B22222"),
+            width = unit(2.5, "cm"),
+            add_numbers = TRUE,
+            numbers_gp = gpar(fontsize = 8, col = "black")
+          ),
+          annotation_name_gp = gpar(fontsize = 9)
+        ),
+        row_names_gp = gpar(fontsize = 9),
+        column_title = paste0(type, " co-detections (n=", length(virus_list_type), ")"),
+        column_title_gp = gpar(fontsize = 12, fontface = "bold")
+      )
+      
+      plot_list[[type]] <- upset_plot_type
+    } else {
+      cat(paste0("Warning: No ", type, " infections found\n"))
+      plot_list[[type]] <- NULL
+    }
+  }
+  
+  return(plot_list)
+}
+
+# Function to combine plots into a panel with adjustable layout
+create_combined_coinf_panel <- function(plot_list, output_prefix,
+                                        width = 12, height = 16, dpi = 300) {
+  
+  # Filter out NULL plots
+  valid_plots <- plot_list[!sapply(plot_list, is.null)]
+  if(length(valid_plots) == 0) {
+    cat("⚠ No valid plots to combine\n")
+    return(NULL)
+  }
+  
+  n_plots <- length(valid_plots)
+  
+  # Layout: 3 rows, 1 column (equal heights)
+  layout_matrix <- rbind(
+    c(1),
+    c(2),
+    c(3)
+  )
+  
+  # Adjust heights for each panel (you can modify these)
+  heights <- c(1.5, 1, 0.8)
+  
+  # Function to draw the panel
+  draw_panel <- function() {
+    pushViewport(viewport(layout = grid.layout(
+      nrow = nrow(layout_matrix),
+      ncol = ncol(layout_matrix),
+      heights = unit(heights, "null")
+    )))
+    
+    plot_idx <- 1
+    for (i in 1:nrow(layout_matrix)) {
+      for (j in 1:ncol(layout_matrix)) {
+        if (layout_matrix[i, j] > 0 && layout_matrix[i, j] <= n_plots) {
+          pushViewport(viewport(layout.pos.row = i, layout.pos.col = j))
+          draw(valid_plots[[plot_idx]], newpage = FALSE)
+          upViewport()
+          plot_idx <- plot_idx + 1
+        }
+      }
+    }
+    
+    upViewport()
+  }
+  
+  # Save as PDF
+  pdf(paste0(output_prefix, ".pdf"), width = width, height = height)
+  draw_panel()
+  dev.off()
+  
+  # Save as TIFF
+  tiff(paste0(output_prefix, ".tiff"),
+       width = width * dpi, height = height * dpi, units = "px",
+       res = dpi, compression = "lzw")
+  draw_panel()
+  dev.off()
+  
+  # Save as JPEG
+  jpeg(paste0(output_prefix, ".jpg"),
+       width = width * dpi, height = height * dpi, units = "px",
+       res = dpi, quality = 95)
+  draw_panel()
+  dev.off()
+  
+  cat("\n=== Panel Created Successfully ===\n")
+  cat(paste0("Files saved as:\n"))
+  cat(paste0("  - ", output_prefix, ".pdf\n"))
+  cat(paste0("  - ", output_prefix, ".tiff\n"))
+  cat(paste0("  - ", output_prefix, ".jpg\n"))
+  cat(paste0("Layout: ", nrow(layout_matrix), " rows × ", ncol(layout_matrix), " columns\n"))
+  cat(paste0("Heights: ", paste(heights, collapse = ", "), "\n"))
+  
+  return(invisible(NULL))
+}
+
+# Usage:
+# Step 1: Create individual plots
+coinfection_plots <- create_coinfection_panel(data_coinf)
+
+# Step 2: Combine into panel with custom layout
+create_combined_coinf_panel(
+  plot_list = coinfection_plots,
+  output_prefix = "figures/Figure_11_co-detection",
+  width = 10,
+  height = 14,
+  dpi = 300
+)
