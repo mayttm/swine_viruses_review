@@ -1,0 +1,959 @@
+#setwd("C:/Users/thongthum.t/OneDrive - University of Florida/Projects/Systematic_Review_Viruses/3_data_analysis/")
+setwd("C:/Users/mmayy/OneDrive - University of Florida/Projects/Systematic_Review_Viruses/3_data_analysis")
+
+#install.packages("meta")
+#install.packages("corrr")
+
+################################################################################
+###------------------------- DESCRIPTIVE STATISTICS -------------------------###
+
+###------------------------------ OUTBREAK DATA -----------------------------###
+
+##------ descriptive summary ------##
+data_outb_single_sum <- read.csv("data/data_outb_single_summary.csv", stringsAsFactors = FALSE)
+data_outb_single <- read.csv("data/data_outb_single.csv", stringsAsFactors = FALSE)
+
+library(dplyr)
+library(tidyr)
+
+data_outb_single_sum <- data_outb_single_sum %>%
+  mutate(
+    virus_group = case_when(
+      main_virus %in% c("PCV2", "PCV3", "PCV4") ~ "PCV",
+      #main_virus %in% c("BDV", "EMCV", "FSfaCV", "PAstV", "PBuV", 
+      #                 "PKoV", "PLV", "PPgV", "PSV", "PTV", "PToV", "RESTV", 
+      #                  "SADS-CoV", "SFTSV", "SaV", "SsPV", "TGEV", "TTV", 
+      #                  "PCLV", "MRV2", "PHEV", ) ~ "Others",
+      TRUE ~ as.character(main_virus), 
+    )
+  )
+
+data_outb_single_sum <- data_outb_single_sum %>%
+  add_count(sample_type, name = "freq") %>%  
+  mutate(
+    sample_type_group = ifelse(freq < 2, "Others", sample_type)
+  ) %>%
+  select(-freq)
+
+# Define columns to summarize
+cols_to_summarize <- c("pub_year", "region", "health_status", 
+                       "pig_type", "virus_group", 
+                       "diag_type", "sample_type_group",
+                       "sample_feces", "sample_serum", "sample_tissues",
+                       "sample_intes", "sample_swab")
+
+data_outb_single_sum <- data_outb_single_sum %>%
+  mutate(pub_year = as.factor(pub_year))
+
+# Summarize frequency and percentage for each column
+outb_single_summary <- data_outb_single_sum %>%
+  select(all_of(cols_to_summarize)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  group_by(variable, value) %>%
+  summarise(Frequency = n(), .groups = "drop") %>%
+  group_by(variable) %>%
+  mutate(Percentage = round(100 * Frequency / sum(Frequency), 2)) %>%
+  arrange(variable, desc(Frequency))
+
+write.csv(outb_single_summary, "output/outb_single_summary.csv", row.names = FALSE)
+
+#####-------pooled
+
+data_outb_pooled_sum <- read.csv("data/data_outb_pooled_summary.csv", stringsAsFactors = FALSE)
+
+library(dplyr)
+library(tidyr)
+
+data_outb_pooled_sum <- data_outb_pooled_sum %>%
+  mutate(
+    virus_group = case_when(
+      main_virus %in% c("PCV2", "PCV3", "PCV4") ~ "PCV",
+      main_virus %in% c("BDV", "EMCV", "FSfaCV", "PAstV", "PBuV", 
+                        "PKoV", "PLV", "PPgV", "PSV", "PTV", "PToV", "RESTV", 
+                        "SADS-CoV", "SFTSV", "SaV", "SsPV", "TGEV", "TTV", "PCLV") ~ "Others",
+      TRUE ~ as.character(main_virus), 
+    )
+  )
+
+data_outb_pooled_sum <- data_outb_pooled_sum %>%
+  add_count(sample_type, name = "freq") %>%  
+  mutate(
+    sample_type_group = ifelse(freq < 2, "Others", sample_type)
+  ) %>%
+  select(-freq)
+
+# Define columns to summarize
+cols_to_summarize <- c("pub_year", "region", "health_status", 
+                       "pig_type", "virus_group", 
+                       "diag_type", "sample_type_group",
+                       "sample_feces", "sample_serum", "sample_tissues",
+                       "sample_intes", "sample_swab")
+
+data_outb_pooled_sum <- data_outb_pooled_sum %>%
+  mutate(pub_year = as.factor(pub_year))
+
+# Summarize frequency and percentage for each column
+outb_pooled_summary <- data_outb_pooled_sum %>%
+  select(all_of(cols_to_summarize)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  group_by(variable, value) %>%
+  summarise(Frequency = n(), .groups = "drop") %>%
+  group_by(variable) %>%
+  mutate(Percentage = round(100 * Frequency / sum(Frequency), 2)) %>%
+  arrange(variable, desc(Frequency))
+
+write.csv(outb_pooled_summary, "output/outb_pooled_summary.csv", row.names = FALSE)
+
+## ========================================================================== ##
+## -------------------------- outbreak summary ------------------------------ ##
+# Load required libraries
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(grid)
+library(gridExtra)
+library(ggrepel)  
+library(scales)   
+
+## Unified color palette for all viruses
+pathogen_colors <- c(
+  # Core viruses (consistent across panels)
+  PBoV = "darkorange4",
+  PoRV = "brown2",
+  PKoV = "salmon2",
+  CSFV = "hotpink",
+  TGEV = "brown4",
+  HEV = "darkgreen",
+  IAV_H1N1 = "darkorange1",
+  IAV = "darkorange3",
+  PCV2 = "darkgoldenrod1",
+  PCV3 = "yellowgreen",
+  PCV4 = "hotpink2",
+  PDCoV = "red3",
+  PEDV = "cyan3",
+  PRRSV = "blue3",
+  PRV = "purple4",
+  SIV = "darkorange",
+  
+  # Molecular-specific viruses
+  PEV = "violet",
+  PTV = "turquoise4",
+  TTV = "goldenrod4",
+  PAstV = "cyan4",
+  MRV2 = "magenta3",
+  PSV = "salmon4",
+  PToV = "aquamarine2",
+  
+  # Serological-specific viruses
+  AIV = "orchid3",
+  EMCV = "steelblue4",
+  SaV = "tan3",
+  PPV = "seagreen4",
+  SFTSV = "plum3",
+  GETV = "bisque1",
+  JEV = "lightblue3",
+  ASFV = "firebrick",
+  PCLV = "rosybrown2",
+  PHEV = "lightsteelblue",
+  
+  # Others category
+  Others = "grey67",
+  Multiple = "slategray1"
+)
+
+## 3. Create molecular combined plots
+pathogen_molec_colors <- pathogen_colors
+
+## 4. Create serological combined plots
+pathogen_sero_colors <- pathogen_colors
+
+################################################################################
+#                      1. DATA LOADING & EXPLORATION                           #
+################################################################################
+
+# Load the data
+data <- read.csv("data/data_outb_single_summary.csv", stringsAsFactors = FALSE)
+
+# Display basic structure
+cat("====== DATA STRUCTURE ======\n")
+str(data)
+cat("\n====== DATA DIMENSIONS ======\n")
+cat("Rows:", nrow(data), "\n")
+cat("Columns:", ncol(data), "\n")
+cat("\n====== COLUMN NAMES ======\n")
+print(colnames(data))
+cat("\n====== FIRST FEW ROWS ======\n")
+print(head(data))
+cat("\n====== DATA SUMMARY ======\n")
+print(summary(data))
+cat("\n====== MISSING VALUES ======\n")
+missing_summary <- data.frame(
+  Variable = colnames(data),
+  Missing_Count = colSums(is.na(data)),
+  Missing_Percent = round(colSums(is.na(data)) / nrow(data) * 100, 2)
+)
+print(missing_summary)
+
+################################################################################
+#                      2. DATA ORGANIZATION & CLEANING                         #
+################################################################################
+
+# Create a working copy
+data_clean <- data
+
+# -------- MAIN VIRUS --------
+specified_viruses <- c("PEDV", "PCLV", "PoRV", "ASFV", "GETV", "IAV", "MRV2", "PHEV", "PKoV", "PRRSV", "PRV")
+
+if("main_virus" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(main_virus_clean = ifelse(main_virus %in% specified_viruses,
+                                     main_virus,
+                                     "Other"))
+  cat("\n====== MAIN VIRUS FREQUENCIES (ORIGINAL) ======\n")
+  print(table(data_clean$main_virus, useNA = "ifany"))
+  cat("\n====== MAIN VIRUS FREQUENCIES (CLEANED) ======\n")
+  print(table(data_clean$main_virus_clean, useNA = "ifany"))
+}
+
+# -------- REGION --------
+if("region" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(region_clean = str_trim(region))
+  cat("\n====== REGION FREQUENCIES ======\n")
+  print(table(data_clean$region_clean, useNA = "ifany"))
+}
+
+# -------- PUBLICATION YEAR --------
+if("pub_year" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(pub_year_clean = as.numeric(pub_year))
+  cat("\n====== PUBLICATION YEAR FREQUENCIES ======\n")
+  print(table(data_clean$pub_year_clean, useNA = "ifany"))
+}
+
+# -------- PIG TYPE --------
+if("pig_type" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(
+      pig_type_clean = str_trim(pig_type),
+      pig_type_clean = ifelse(is.na(pig_type_clean) | pig_type_clean == "", 
+                              "Not Reported", 
+                              pig_type_clean),
+      pig_type_clean = case_when(
+        tolower(pig_type_clean) == "multiple" ~ "Multiple",
+        tolower(pig_type_clean) == "piglet" ~ "Suckling pig",
+        tolower(pig_type_clean) == "fattening_pig" ~ "Fattening pig",
+        tolower(pig_type_clean) == "nursery_pig" ~ "Nursery pig",
+        tolower(pig_type_clean) == "boar" ~ "Boar",
+        tolower(pig_type_clean) == "sow" ~ "Sow",
+        TRUE ~ pig_type_clean
+      )
+    )
+  cat("\n====== PIG TYPE FREQUENCIES ======\n")
+  print(table(data_clean$pig_type_clean, useNA = "ifany"))
+}
+
+# -------- SAMPLE TYPE --------
+sample_cols <- grep("^sample_", colnames(data_clean), value = TRUE)
+sample_cols <- sample_cols[!sample_cols %in% c("sample_healthy", "sample_diseased", "sample_type", "sample_size")]
+cat("\n====== SAMPLE TYPE COLUMNS FOUND ======\n")
+print(sample_cols)
+
+if(length(sample_cols) > 0) {
+  sample_summary <- data_clean %>%
+    select(all_of(sample_cols)) %>%
+    summarise(across(everything(), ~sum(. == 1 | . == "1" | tolower(.) == "yes", na.rm = TRUE)))
+  cat("\n====== SAMPLE TYPE FREQUENCIES ======\n")
+  print(t(sample_summary))
+}
+
+# -------- HEALTH STATUS --------
+if("health_status" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(
+      health_status_clean = str_trim(health_status),
+      health_status_clean = ifelse(is.na(health_status_clean) | health_status_clean == "", 
+                                   "Not Reported", 
+                                   health_status_clean),
+      health_status_clean = case_when(
+        tolower(health_status_clean) == "diseased" ~ "Diseased pig",
+        tolower(health_status_clean) == "healthy" ~ "Healthy pig",
+        tolower(health_status_clean) == "healthy_diseased" ~ "Mix of Healthy and Diseased pigs",
+        TRUE ~ health_status_clean
+      )
+    )
+  cat("\n====== HEALTH STATUS FREQUENCIES ======\n")
+  print(table(data_clean$health_status_clean, useNA = "ifany"))
+}
+
+# -------- DIAGNOSTIC TYPE --------
+if("diag_type" %in% colnames(data_clean)) {
+  data_clean <- data_clean %>%
+    mutate(
+      diag_type_clean = str_trim(diag_type),
+      diag_type_clean = str_replace_all(diag_type_clean, "_", " "),
+      diag_type_clean = str_to_title(diag_type_clean),
+      diag_type_clean = ifelse(is.na(diag_type_clean) | diag_type_clean == "", 
+                               "Not Reported", 
+                               diag_type_clean)
+    )
+  cat("\n====== DIAGNOSTIC TYPE FREQUENCIES ======\n")
+  print(table(data_clean$diag_type_clean, useNA = "ifany"))
+}
+
+################################################################################
+#                      3. IMPROVED VISUALIZATION FUNCTIONS                     #
+################################################################################
+
+# Function to create donut chart without labels
+create_donut_chart <- function(data, var_name, title) {
+  # Prepare data
+  plot_data <- data %>%
+    mutate(!!sym(var_name) := ifelse(is.na(!!sym(var_name)), "Not Reported", as.character(!!sym(var_name)))) %>%
+    count(!!sym(var_name)) %>%
+    arrange(desc(n)) %>%
+    mutate(
+      percentage = n / sum(n) * 100,
+      !!sym(var_name) := factor(!!sym(var_name), levels = !!sym(var_name))
+    )
+  
+  # Create plot without any labels
+  p <- ggplot(plot_data, aes(x = 2, y = n, fill = !!sym(var_name))) +
+    geom_bar(stat = "identity", width = 1, color = "white", size = 0.8) +
+    coord_polar(theta = "y", start = 0) +
+    xlim(0.5, 2.5) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 13, face = "bold",
+                                margin = margin(b = 10)),
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      legend.position = "right",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 8.5),
+      legend.key.size = unit(0.7, "cm"),
+      legend.background = element_rect(fill = "white", color = NA),
+      plot.margin = margin(10, 5, 10, 5) ,
+      aspect.ratio = 1
+    ) +
+    labs(title = title) +
+    scale_fill_manual(
+      values = colorRampPalette(c("#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072",
+                                  "#80B1D3", "#FDB462", "#B3DE69", "#FCCDE5",
+                                  "#D9D9D9", "#BC80BD", "#CCEBC5", "#FFED6F"))(
+                                    nrow(plot_data)),
+      labels = function(x) {
+        idx <- match(x, plot_data[[var_name]])
+        paste0(str_wrap(x, 20), " (",
+               sprintf("%.1f%%", plot_data$percentage[idx]), ")")
+      }
+    )
+  
+  return(p)
+}
+
+create_virus_donut_chart <- function(data, var_name, title) {
+  # Prepare data
+  plot_data <- data %>%
+    mutate(!!sym(var_name) := ifelse(is.na(!!sym(var_name)), "Not Reported", as.character(!!sym(var_name)))) %>%
+    count(!!sym(var_name)) %>%
+    arrange(desc(n)) %>%
+    mutate(
+      percentage = n / sum(n) * 100,
+      !!sym(var_name) := factor(!!sym(var_name), levels = !!sym(var_name))
+    )
+  
+  # Use pathogen_colors for viruses
+  virus_names <- as.character(plot_data[[var_name]])
+  fill_colors <- pathogen_colors[virus_names]
+  # For any viruses not in pathogen_colors, assign a default color
+  fill_colors[is.na(fill_colors)] <- "grey67"
+  names(fill_colors) <- virus_names
+  
+  # Create plot without any labels
+  p <- ggplot(plot_data, aes(x = 2, y = n, fill = !!sym(var_name))) +
+    geom_bar(stat = "identity", width = 1, color = "white", size = 0.8) +
+    coord_polar(theta = "y", start = 0) +
+    xlim(0.5, 2.5) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 13, face = "bold",
+                                margin = margin(b = 10)),
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      legend.position = "right",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 8.5),
+      legend.key.size = unit(0.7, "cm"),
+      legend.background = element_rect(fill = "white", color = NA),
+      plot.margin = margin(10, 5, 10, 5),
+      aspect.ratio = 1
+    ) +
+    labs(title = title) +
+    scale_fill_manual(
+      values = fill_colors,
+      labels = function(x) {
+        idx <- match(x, plot_data[[var_name]])
+        paste0(str_wrap(x, 20), " (",
+               sprintf("%.1f%%", plot_data$percentage[idx]), ")")
+      }
+    )
+  
+  return(p)
+}
+
+create_sample_type_chart <- function(data, sample_cols, title) {
+  sample_summary <- data %>%
+    select(all_of(sample_cols)) %>%
+    summarise(across(everything(), ~sum(. == 1 | . == "1" | tolower(.) == "yes", na.rm = TRUE))) %>%
+    pivot_longer(everything(), names_to = "sample_type", values_to = "count") %>%
+    arrange(desc(count)) %>%
+    mutate(
+      sample_type = str_replace(sample_type, "^sample_", ""),
+      sample_type = str_to_title(str_replace_all(sample_type, "_", " ")),
+      # Change "intes" to "intestine"
+      sample_type = ifelse(tolower(sample_type) == "intes", "Intestine", sample_type),
+      percentage = count / nrow(data) * 100,
+      sample_type = factor(sample_type, levels = sample_type)
+    )
+  
+  p <- ggplot(sample_summary, aes(x = 2, y = count, fill = sample_type)) +
+    geom_bar(stat = "identity", width = 1, color = "white", size = 0.8) +
+    coord_polar(theta = "y", start = 0) +
+    xlim(0.5, 2.5) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 13, face = "bold",
+                                margin = margin(b = 10)),
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      legend.position = "right",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 8.5),
+      legend.key.size = unit(0.7, "cm"),
+      legend.background = element_rect(fill = "white", color = NA),
+      plot.caption = element_text(size = 7.5, hjust = 0.5, color = "gray40",
+                                  margin = margin(t = 5)),
+      plot.margin = margin(10, 5, 10, 5) ,
+      aspect.ratio = 1
+    ) +
+    labs(title = title,
+         caption = "Note: Non-mutually exclusive categories") +
+    scale_fill_manual(
+      values = colorRampPalette(c("#8DD3C7", "#FFFFB3", "#BEBADA", "#FB8072",
+                                  "#80B1D3", "#FDB462", "#B3DE69"))(
+                                    nrow(sample_summary)),
+      labels = function(x) {
+        idx <- match(x, sample_summary$sample_type)
+        paste0(str_wrap(x, 20), " (",
+               sprintf("%.1f%%", sample_summary$percentage[idx]), ")")
+      }
+    )
+  
+  return(p)
+}
+
+# Function to create improved publication year bar chart
+create_pub_year_bar <- function(data, var_name, title) {
+  
+  plot_data <- data %>%
+    filter(!is.na(!!sym(var_name))) %>%
+    count(!!sym(var_name)) %>%
+    arrange(!!sym(var_name))
+  
+  p <- ggplot(plot_data, aes(x = factor(!!sym(var_name)), y = n)) +
+    geom_bar(stat = "identity", fill = "#f78fa1", color = "white", 
+             width = 0.75, alpha = 0.9) +
+    geom_text(aes(label = n),
+              vjust = -0.4, size = 3, fontface = "bold", color = "gray20") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 13, face = "bold",
+                                margin = margin(b = 10)),
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_line(color = "gray90", size = 0.3),
+      axis.text.x = element_text(size = 9, color = "gray20"),
+      axis.text.y = element_text(size = 9, color = "gray20"),
+      axis.title = element_text(size = 10, face = "bold", color = "gray20"),
+      plot.margin = margin(15, 15, 15, 15)
+    ) +
+    labs(title = title,
+         x = "Publication Year",
+         y = "Number of Studies") +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.12)))
+  
+  return(p)
+}
+
+################################################################################
+#                      4. CREATE INDIVIDUAL VISUALIZATIONS                     #
+################################################################################
+
+# Create output directory
+dir.create("figures/summary_charts_outbreak", recursive = TRUE, showWarnings = FALSE)
+
+# Store plots in a list
+plot_list <- list()
+
+# 1. Main Virus
+if("main_virus_clean" %in% colnames(data_clean)) {
+  plot_list$main_virus <- create_virus_donut_chart(
+    data_clean,
+    "main_virus_clean",
+    "Main Virus Distribution"
+  )
+  ggsave("figures/summary_charts_outbreak/main_virus_donut.jpg",
+         plot_list$main_virus, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: main_virus_donut.png\n")
+}
+
+# 2. Region
+if("region_clean" %in% colnames(data_clean)) {
+  plot_list$region <- create_donut_chart(
+    data_clean,
+    "region_clean",
+    "Study Region Distribution"
+  )
+  ggsave("figures/summary_charts_outbreak/region_donut.jpg",
+         plot_list$region, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: region_donut.png\n")
+}
+
+# 3. Pig Type
+if("pig_type_clean" %in% colnames(data_clean)) {
+  plot_list$pig_type <- create_donut_chart(
+    data_clean,
+    "pig_type_clean",
+    "Pig Type Distribution"
+  )
+  ggsave("figures/summary_charts_outbreak/pig_type_donut.jpg",
+         plot_list$pig_type, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: pig_type_donut.png\n")
+}
+
+# 4. Sample Type
+if(length(sample_cols) > 0) {
+  plot_list$sample_type <- create_sample_type_chart(
+    data_clean,
+    sample_cols,
+    "Sample Type Distribution"
+  )
+  ggsave("figures/summary_charts_outbreak/sample_type_donut.jpg",
+         plot_list$sample_type, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: sample_type_donut.png\n")
+}
+
+# 5. Health Status
+if("health_status_clean" %in% colnames(data_clean)) {
+  plot_list$health_status <- create_donut_chart(
+    data_clean,
+    "health_status_clean",
+    "Health Status Distribution"
+  )
+  ggsave("figures/summary_charts_outbreak/health_status_donut.jpg",
+         plot_list$health_status, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: health_status_donut.png\n")
+}
+
+# 6. Diagnostic Type
+if("diag_type_clean" %in% colnames(data_clean)) {
+  plot_list$diag_type <- create_donut_chart(
+    data_clean,
+    "diag_type_clean",
+    "Diagnostic Type Distribution"
+  )
+  ggsave("figures/summary_charts_outbreak/diag_type_donut.jpg",
+         plot_list$diag_type, width = 5, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: diag_type_donut.png\n")
+}
+
+# 7. Publication Year
+if("pub_year_clean" %in% colnames(data_clean)) {
+  plot_list$pub_year <- create_pub_year_bar(
+    data_clean,
+    "pub_year_clean",
+    "Publication Year Distribution"
+  )
+  ggsave("figures/summary_charts_outbreak/pub_year_bar.jpg",
+         plot_list$pub_year, width = 8, height = 4, dpi = 300, bg = "white")
+  cat("✅ Saved: pub_year_bar.png\n")
+}
+
+################################################################################
+#                      5. CREATE IMPROVED COMBINED PANEL                       #
+################################################################################
+
+create_combined_panel <- function(plot_list, output_file) {
+  # Filter out NULL plots
+  valid_plots <- plot_list[!sapply(plot_list, is.null)]
+  if(length(valid_plots) == 0) {
+    cat("⚠ No valid plots to combine\n")
+    return(NULL)
+  }
+  n_plots <- length(valid_plots)
+  
+  # Simple 3x3 layout
+  layout_matrix <- rbind(
+    c(1, 2),
+    c(3, 4),
+    c(5, 6),   
+    c(7, 7)   
+  )
+  heights <- c(1.5, 1, 1, 1)
+  
+  # Arrange plots
+  combined_plot <- arrangeGrob(
+    grobs = valid_plots,
+    layout_matrix = layout_matrix,
+    heights = heights
+  )
+  
+  # Fixed dimensions for 3x3 layout
+  plot_width <- 10
+  plot_height <- 14
+  
+  # Save combined plot
+  ggsave(output_file,
+         combined_plot,
+         width = plot_width,
+         height = plot_height,
+         dpi = 300,
+         bg = "white")
+  
+  cat(paste0("✅ Combined panel saved: ", output_file, "\n"))
+  cat(paste0("   Dimensions: ", plot_width, " × ", plot_height,
+             " inches (", n_plots, " plots)\n"))
+  
+  return(combined_plot)
+}
+
+# Create combined panel
+combined_panel <- create_combined_panel(
+  plot_list,
+  "figures/Figure_2_outbreak_summary.jpg"
+)
+
+combined_panel <- create_combined_panel(
+  plot_list,
+  "figures/Figure_2_outbreak_summary.tiff"
+)
+
+combined_panel <- create_combined_panel(
+  plot_list,
+  "figures/Figure_2_outbreak_summary.pdf"
+)
+
+## ========================================================================== ##
+## --------------------- temporal mapping outbreaks ------------------------- ##
+
+library(tidyverse)
+library(patchwork)
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(readr)
+
+## --------- Shapefile --------
+canon <- function(x) {
+  x <- as.character(x)
+  x <- iconv(x, to = "ASCII//TRANSLIT")
+}
+
+normalize_adm1 <- function(x) {
+  x <- trimws(as.character(x))
+  x <- gsub("\\s*\\(.*\\)$", "", x)
+  x <- gsub("\\s+(Province|Municipality|Special Administrative Region|Autonomous Region)$", "", x, ignore.case = TRUE)
+  x <- gsub("^Xizang$", "Tibet", x, ignore.case = TRUE)
+  x <- gsub("^Macao.*$", "Macau", x, ignore.case = TRUE)
+  x <- gsub("^Hong\\s*Kong.*$", "Hong Kong", x, ignore.case = TRUE)
+  x
+}
+
+collapse_levels <- function(x, n_min = 50) {
+  x <- forcats::fct_explicit_na(factor(x), na_level = "unknown")
+  tab <- table(x); rare <- names(tab)[tab < n_min]
+  forcats::fct_collapse(x, Other = rare)
+}
+
+# Define the load shapefile snippet as a function
+load_shapefile <- function() {
+  shp_path <- "arcgis/shapefile/chn_admbnda_adm1_ocha_2020.shp"
+  prov_col <- "ADM1_EN"
+  china <- sf::st_read(shp_path, quiet = TRUE) %>%
+    mutate(
+      province_shp = normalize_adm1(.data[[prov_col]]),
+      province_shp = dplyr::case_when(
+        province_shp == "Guangxi Zhuang" ~ "Guangxi",
+        province_shp == "Xinjiang Uygur" ~ "Xinjiang",
+        province_shp == "Ningxia Hui" ~ "Ningxia",
+        province_shp == "Nei Mongol" ~ "Inner Mongolia",
+        province_shp == "Xizang" ~ "Tibet",
+        province_shp == "Taiwan" ~ "Taiwan",
+        province_shp == "Hong Kong" ~ "Hong Kong",
+        province_shp == "Macau" ~ "Macau",
+        TRUE ~ province_shp
+      ),
+      prov_key = canon(province_shp)
+    )
+  return(china)
+}
+
+china <- load_shapefile()
+
+##------------------------- mapping data preparation------------------------- ##
+
+# Load Libraries
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringi)
+
+# 1. Ensure UTF-8 Compatibility
+try(Sys.setlocale("LC_ALL", "en_US.UTF-8"), silent = TRUE)
+try(Sys.setlocale("LC_CTYPE", "en_US.UTF-8"), silent = TRUE)
+
+data_outb_single <- data_outb_single %>%
+  mutate(across(where(is.character), ~ enc2utf8(.)))
+
+bad_rows <- data_outb_single %>%
+  filter(!stri_enc_isutf8(province) | !stri_enc_isutf8(virus))
+
+if (nrow(bad_rows) > 0) {
+  message("⚠️ Found non-UTF8 characters in the dataset. Automatically fixing...")
+  data_outb_single <- data_outb_single %>%
+    mutate(across(where(is.character), ~ stri_encode(., "", "UTF-8")))
+}
+
+# 2. Province-Level Summary
+outb_province_profile <- data_outb_single %>%
+  group_by(province) %>%
+  summarise(
+    frequency_pub_ID = n_distinct(pub_ID),   # Unique publications
+    frequency_virus_studied = n_distinct(virus), # Unique virus groups studied
+    frequency_virus_detected = n_distinct(virus[positive_sample > 0]),
+    sample_number = sum(sample_size, na.rm = TRUE),
+    total_positive = sum(positive_sample, na.rm = TRUE),
+    average_prevalence = ifelse(sample_number > 0, total_positive / sample_number, NA),
+    min_sampling_year = min(sampling_year, na.rm = TRUE),  # Earliest year
+    max_sampling_year = max(sampling_year, na.rm = TRUE),  # Newest year
+    .groups = "drop"
+  )
+
+# 3. Positive sample per Virus Group per Province
+outb_virus_group_profile <- data_outb_single %>%
+  mutate(
+    virus_group_mod = case_when(
+      virus == "IAV" & grepl("H1N1", subtype_strain, ignore.case = TRUE) ~ "IAV_H1N1",
+      virus == "PCV" & grepl("PCV2", virus, ignore.case = TRUE) ~ "PCV2",
+      virus == "PCV" & grepl("PCV3", virus, ignore.case = TRUE) ~ "PCV3",
+      TRUE ~ virus
+    )
+  ) %>%
+  group_by(province, virus_group_mod) %>%
+  summarise(positive_sample_group = sum(positive_sample, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(
+    names_from = virus_group_mod,
+    values_from = positive_sample_group,
+    values_fill = 0
+  )
+
+# 4. Weighted Average Prevalence per Virus Group per Province
+outb_virus_group_prevalence <- data_outb_single %>%
+  mutate(
+    virus_group_mod = case_when(
+      virus == "IAV" & grepl("H1N1", subtype_strain, ignore.case = TRUE) ~ "IAV_H1N1",
+      virus == "PCV" & grepl("PCV2", virus, ignore.case = TRUE) ~ "PCV2",
+      virus == "PCV" & grepl("PCV3", virus, ignore.case = TRUE) ~ "PCV3",
+      TRUE ~ virus
+    )
+  ) %>%
+  group_by(province, virus_group_mod) %>%
+  summarise(
+    avg_prevalence = sum(positive_sample, na.rm = TRUE) / sum(sample_size, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    names_from = virus_group_mod,
+    values_from = avg_prevalence,
+    names_prefix = "avg_prev_",
+    values_fill = 0
+  )
+
+# 5. Merge All Profiles
+outb_province_virus_profile <- outb_province_profile %>%
+  left_join(outb_virus_group_profile, by = "province") %>%
+  left_join(outb_virus_group_prevalence, by = "province")
+
+## -------------------------------- mapping --------------------------------- ##
+
+##------ create functions------
+#install.packages("ggpattern")
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(ggpattern)
+library(patchwork)
+
+theme_set(theme_minimal(base_size = 12, base_family = "sans"))
+
+create_yearly_outbreak <- function(df) {
+  years <- sort(unique(df$sampling_year))
+  yearly_list <- list()
+  for (yr in years) {
+    df_year <- df %>%
+      filter(sampling_year == yr) %>%
+      group_by(province, virus) %>%
+      summarise(
+        avg_prevalence = sum(positive_sample, na.rm = TRUE) / sum(sample_size, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      pivot_wider(
+        names_from = virus,
+        values_from = avg_prevalence,
+        values_fill = 0
+      )
+    yearly_list[[as.character(yr)]] <- df_year
+  }
+  yearly_list
+}
+
+yearly_outbreaks <- create_yearly_outbreak(data_outb_single)
+
+map_yearly_outbreak <- function(year_df, shapefile_sf, year, base_size = 12, line_width = 0.25) {
+  year_df <- as.data.frame(year_df)
+  
+  year_long <- year_df %>%
+    pivot_longer(
+      cols = -province,
+      names_to = "virus",
+      values_to = "prevalence"
+    ) %>%
+    filter(prevalence > 0)
+  
+  # Only keep viruses that are actually detected AND have defined colors
+  detected_viruses <- intersect(unique(year_long$virus), names(pathogen_molec_colors))
+  
+  # If nothing detected, return a blank map with a note
+  if (length(detected_viruses) == 0) {
+    return(
+      ggplot() +
+        geom_sf(data = shapefile_sf, fill = "grey90", color = "grey40", linewidth = line_width) +
+        labs(title = paste0("Outbreaks in ", year), subtitle = "No outbreaks recorded") +
+        theme(
+          legend.position = "none",
+          plot.title = element_text(size = base_size + 2, family = "sans", face = "bold"),
+          plot.subtitle = element_text(size = base_size - 1, family = "sans")
+        )
+    )
+  }
+  
+  year_long <- year_long %>%
+    filter(virus %in% detected_viruses) %>%
+    group_by(province) %>%
+    arrange(province, virus, .by_group = TRUE) %>%
+    mutate(rank = row_number()) %>%
+    ungroup()
+  
+  map_long <- shapefile_sf %>%
+    inner_join(year_long, by = c("province_shp" = "province")) %>%
+    st_as_sf()
+  
+  first_virus    <- filter(map_long, rank == 1)
+  stripe_viruses <- filter(map_long, rank > 1)
+  
+  provinces_with_outbreak <- unique(map_long$province_shp)
+  subtitle_text <- paste(provinces_with_outbreak, collapse = ", ")
+  
+  ggplot() +
+    geom_sf(data = shapefile_sf, fill = "grey90", color = "grey40", linewidth = line_width) +
+    geom_sf(data = first_virus, aes(fill = virus), color = "black", linewidth = line_width, show.legend = TRUE) +
+    geom_sf_pattern(
+      data = stripe_viruses,
+      aes(pattern_fill = virus),
+      fill = NA,
+      pattern = "stripe",
+      color = "black",
+      linewidth = line_width,
+      pattern_density = 0.5,
+      pattern_spacing = 0.02,
+      pattern_angle = 45,
+      show.legend = FALSE
+    ) +
+    # Only show detected viruses in the legend
+    scale_fill_manual(values = pathogen_molec_colors, limits = detected_viruses, drop = TRUE) +
+    scale_pattern_fill_manual(values = pathogen_molec_colors, limits = detected_viruses, drop = TRUE) +
+    labs(title = paste0("Outbreaks in ", year), subtitle = subtitle_text) +
+    coord_sf(expand = FALSE) +
+    theme(
+      legend.title = element_blank(),
+      plot.title = element_text(size = base_size + 2, family = "sans"),
+      plot.subtitle = element_text(size = base_size - 1, family = "sans"),
+      legend.text = element_text(size = base_size - 1, family = "sans")
+    )
+}
+
+# Create individual maps
+outb_map_2011 <- map_yearly_outbreak(yearly_outbreaks[["2011"]], china, 2011)
+outb_map_2012 <- map_yearly_outbreak(yearly_outbreaks[["2012"]], china, 2012)
+outb_map_2013 <- map_yearly_outbreak(yearly_outbreaks[["2013"]], china, 2013)
+outb_map_2015 <- map_yearly_outbreak(yearly_outbreaks[["2015"]], china, 2015)
+outb_map_2016 <- map_yearly_outbreak(yearly_outbreaks[["2016"]], china, 2016)
+outb_map_2017 <- map_yearly_outbreak(yearly_outbreaks[["2017"]], china, 2017)
+outb_map_2018 <- map_yearly_outbreak(yearly_outbreaks[["2018"]], china, 2018)
+outb_map_2019 <- map_yearly_outbreak(yearly_outbreaks[["2019"]], china, 2019)
+outb_map_2020 <- map_yearly_outbreak(yearly_outbreaks[["2020"]], china, 2020)
+outb_map_2022 <- map_yearly_outbreak(yearly_outbreaks[["2022"]], china, 2022)
+outb_map_2024 <- map_yearly_outbreak(yearly_outbreaks[["2024"]], china, 2024)
+
+# Combine and collect legends (will show only viruses detected across the included maps)
+# Swine Viruses Outbreaks in China during 2011–2024
+combined_outb_maps <- outb_map_2011 + outb_map_2012 + outb_map_2013 +
+  outb_map_2015 + outb_map_2016 + outb_map_2017 +
+  outb_map_2018 + outb_map_2019 + outb_map_2020 +
+  outb_map_2022 + outb_map_2024 +
+  plot_layout(ncol = 3, nrow = 4, guides = "keep") +
+  plot_annotation(
+    title = "",
+    theme = theme(plot.title = element_text(size = 14, family = "sans", face = "bold"))
+  )
+
+print(combined_outb_maps)
+
+# Export settings
+export_width <- 16
+export_height <- 14
+export_dpi <- 300
+
+# --- Outbreak maps figure ---
+# TIFF
+ggsave(
+  filename = "figures/Figure_3_outbreak_maps.tiff",
+  plot = combined_outb_maps,
+  width = export_width, height = export_height, units = "in",
+  dpi = export_dpi, device = "tiff",
+  compression = "lzw",
+  bg = "white"
+)
+
+# PDF
+ggsave(
+  filename = "figures/Figure_3_outbreak_maps.pdf",
+  plot = combined_outb_maps,
+  width = export_width, height = export_height, units = "in",
+  device = "pdf",
+  bg = "white"
+)
+
+# JPG
+ggsave(
+  filename = "figures/Figure_3_outbreak_maps.jpg",
+  plot = combined_outb_maps,
+  width = export_width, height = export_height, units = "in",
+  dpi = export_dpi, device = "jpeg",
+  bg = "white", quality = 95
+)
