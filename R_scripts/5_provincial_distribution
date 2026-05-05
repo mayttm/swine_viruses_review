@@ -1,0 +1,822 @@
+## ========================================================================== ##
+###--------------------  PROVINCIAL VIRUS DISTRIBUTION ----------------------###
+
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer)
+library(patchwork)
+library(sf)
+
+canon <- function(x) {
+  x <- as.character(x)
+  x <- iconv(x, to = "ASCII//TRANSLIT")
+  return(x)
+}
+
+normalize_adm1 <- function(x) {
+  x <- trimws(as.character(x))
+  x <- gsub("\\s*\\(.*\\)$", "", x)
+  x <- gsub("\\s+(Province|Municipality|Special Administrative Region|Autonomous Region)$", "", x, ignore.case = TRUE)
+  x <- gsub("^Xizang$", "Tibet", x, ignore.case = TRUE)
+  x <- gsub("^Macao.*$", "Macau", x, ignore.case = TRUE)
+  x <- gsub("^Hong\\s*Kong.*$", "Hong Kong", x, ignore.case = TRUE)
+  return(x)
+}
+
+load_shapefile <- function() {
+  shp_path <- "arcgis/shapefile/chn_admbnda_adm1_ocha_2020.shp"
+  prov_col <- "ADM1_EN"
+  china <- sf::st_read(shp_path, quiet = TRUE) %>%
+    mutate(
+      province_shp = normalize_adm1(.data[[prov_col]]),
+      province_shp = dplyr::case_when(
+        province_shp == "Guangxi Zhuang" ~ "Guangxi",
+        province_shp == "Xinjiang Uygur" ~ "Xinjiang",
+        province_shp == "Ningxia Hui" ~ "Ningxia",
+        province_shp == "Nei Mongol" ~ "Inner Mongolia",
+        province_shp == "Xizang" ~ "Tibet",
+        province_shp == "Taiwan" ~ "Taiwan",
+        province_shp == "Hong Kong" ~ "Hong Kong",
+        province_shp == "Macau" ~ "Macau",
+        TRUE ~ province_shp
+      ),
+      prov_key = canon(province_shp)
+    )
+  return(china)
+}
+
+## -- prepare data --
+
+process_province_virus_data <- function(data, diag_type) {
+  # Step 1: Clean data
+  data <- data %>%
+    mutate(
+      virus = trimws(virus),
+      province = trimws(province),
+      positive_sample = as.numeric(positive_sample)  # Ensure positive_sample is numeric
+    )
+  
+  if (diag_type == "molecular") {
+    # Step 2: Calculate virus prevalence for molecular data
+    virus_freq <- data %>%
+      count(virus, name = "n") %>%
+      mutate(freq = n / nrow(data))
+    
+    # Step 3: Identify viruses below threshold for molecular data
+    low_freq_viruses <- virus_freq %>%
+      filter(freq < 0.01) %>%  # 1% threshold
+      pull(virus)
+  } else {
+    # No threshold for serological data
+    low_freq_viruses <- character(0)
+  }
+  
+  # Step 4: Group viruses
+  data <- data %>%
+    mutate(
+      virus_group = case_when(
+        virus %in% c("PCV2", "PCV3", "PCV4") ~ "PCV",
+        virus %in% c("TTV", "TTSuV") ~ "TTV",
+        virus %in% low_freq_viruses ~ "Others",
+        TRUE ~ virus
+      )
+    )
+  
+  # Step 5: Process data
+  virus_group_profile <- data %>%
+    mutate(
+      virus_group_mod = case_when(
+        virus_group == "IAV" & grepl("H1N1", subtype_strain, ignore.case = TRUE) ~ "IAV_H1N1",
+        virus_group == "PCV" & grepl("PCV2", virus, ignore.case = TRUE) ~ "PCV2",
+        virus_group == "PCV" & grepl("PCV3", virus, ignore.case = TRUE) ~ "PCV3",
+        TRUE ~ virus_group
+      )
+    ) %>%
+    group_by(province, virus_group_mod) %>%
+    summarise(positive_sample_group = sum(positive_sample, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(
+      names_from = virus_group_mod,
+      values_from = positive_sample_group,
+      values_fill = list(positive_sample_group = 0)
+    ) %>%
+    select(-any_of(c("IAV", "PCV")))
+  
+  return(virus_group_profile)
+}
+
+province_virus_profile_molec <- process_province_virus_data(data_surv_single_molec, "molecular")
+province_virus_profile_sero <- process_province_virus_data(data_surv_single_sero, "serological")
+
+## ----- create plotting function
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(patchwork)
+library(ggrepel)
+library(ragg)   # for consistent, high-quality TIFF output
+library(grid)   # for unit()
+
+china <- load_shapefile()
+
+create_combined_plot <- function(data, data_2, colors, china, output_file) {
+  # Prepare the wide-format province dataset
+  virus_cols <- setdiff(colnames(data), "province")
+  data_long <- data %>%
+    pivot_longer(cols = all_of(virus_cols), names_to = "virus", values_to = "count") %>%
+    mutate(count = as.numeric(count)) %>%
+    group_by(province) %>%
+    mutate(perc = 100 * count / sum(count, na.rm = TRUE)) %>%
+    ungroup()
+  
+  # Order viruses by total percentage across all provinces (descending)
+  virus_order <- data_long %>%
+    group_by(virus) %>%
+    summarise(total_perc = sum(perc, na.rm = TRUE), .groups = "drop") %>%
+    arrange(desc(total_perc)) %>%
+    pull(virus)
+  
+  # Apply factor levels based on overall percentage
+  data_long <- data_long %>%
+    mutate(virus = factor(virus, levels = virus_order))
+  
+  # Use the province_profile dataset for province_positive
+  province_positive <- data_2 %>%
+    mutate(total_positive = as.numeric(total_positive)) %>%
+    group_by(province) %>%
+    summarise(total_positive = sum(total_positive, na.rm = TRUE), .groups = "drop") %>%
+    mutate(prov_key = canon(province))
+  
+  # Merge with shapefile data
+  china_map <- china %>%
+    left_join(province_positive, by = c("province_shp" = "prov_key")) %>%
+    mutate(total_positive = ifelse(is.na(total_positive), 0, total_positive)) %>%
+    mutate(
+      total_positive = ifelse(province_shp %in% c("Taiwan", "Hong Kong", "Macau"), NA, total_positive)
+    )
+  
+  # Create donut chart
+  donut_chart <- ggplot(data_long, aes(x = 2, y = perc, fill = virus)) +
+    annotate("rect", xmin = 1.3, xmax = 1.7, ymin = -Inf, ymax = Inf, fill = "white", color = NA) +
+    geom_bar(stat = "identity", width = 1, color = "white") +
+    coord_polar(theta = "y") +
+    xlim(0.5, 2.5) +
+    facet_wrap(~ province, ncol = 6) +
+    scale_fill_manual(values = colors) +
+    theme_void() +
+    theme(
+      strip.text  = element_text(size = 16, family = "sans"),
+      legend.position = "right",
+      legend.title = element_text(size = 16, family = "sans"),
+      legend.text  = element_text(size = 16, family = "sans"),
+      plot.title   = element_text(size = 16, family = "sans"),
+      plot.subtitle= element_text(size = 16, family = "sans"),
+      plot.caption = element_text(size = 16, family = "sans"),
+      plot.tag     = element_text(size = 16, family = "sans")
+    ) +
+    guides(fill = guide_legend(title = "Virus"))
+  
+  # China map
+  china_plot <- ggplot(china_map) +
+    geom_sf(aes(fill = total_positive), color = "black", size = 0.2) +
+    geom_text_repel(
+      aes(label = province_shp, geometry = geometry),
+   #  color = ifelse(china_map$province_shp %in% c("Sichuan", "Guangxi", "Guangdong", "Henan"), "white", "black"),
+      color = ifelse(china_map$province_shp %in% c("Shandong"), "white", "black"),
+      stat = "sf_coordinates",
+      min.segment.length = 0,
+      size = 3
+    ) +
+    scale_fill_viridis_c(
+      name = "Total positive samples by province",
+      option = "C",
+      direction = -1,
+      na.value = "grey85",
+      limits = c(0, 25000),
+      guide = guide_colorbar(
+        barheight = unit(5, "cm"),
+        barwidth  = unit(0.5, "cm"),
+        title.position = "top",
+        title.hjust = 0,
+        title.theme = element_text(
+          size = 14, family = "sans",
+          margin = margin(b = 15)
+        )
+      )
+    ) +
+    theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.grid.major = element_line(color = "grey80", size = 0.3),
+      panel.grid.minor = element_line(color = "grey90", size = 0.2),
+      legend.position = "right",
+      legend.title = element_text(size = 16, family = "sans"),
+      legend.text  = element_text(size = 16, family = "sans"),
+      plot.margin  = margin(1, 1, 1, 1, "cm")
+    ) +
+    labs(fill = "Total positive samples by province")
+  
+  # Combine plots using patchwork
+  layout <- "
+  AAAAAAAAA
+  AAAAAAAAA
+  AAAAAAAAA
+  BBBBBBBBB
+  BBBBBBBBB
+  BBBBBBBBB
+  BBBBBBBBB
+  "
+  combined_plot <- china_plot + donut_chart +
+    plot_layout(design = layout, guides = "collect") +
+    plot_annotation(tag_levels = "A") &
+    theme(
+      legend.position = "right",
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.spacing = unit(0.5, "lines"),
+      text = element_text(family = "sans")
+    )
+  
+  # Save combined plot - ggsave automatically detects format from extension
+  ggsave(
+    filename = output_file,
+    plot = combined_plot,
+    width = 15,
+    height = 18,
+    units = "in",
+    dpi = 300,
+    bg = "white"
+  )
+  
+  return(combined_plot)
+}
+
+## Unified color palette for all viruses
+pathogen_colors <- c(
+  # Core viruses (consistent across panels)
+  PBoV = "darkorange4",
+  PoRV = "brown2",
+  PKoV = "salmon2",
+  CSFV = "hotpink",
+  TGEV = "brown4",
+  HEV = "darkgreen",
+  IAV_H1N1 = "darkorange1",
+  IAV = "darkorange3",
+  PCV2 = "darkgoldenrod1",
+  PCV3 = "yellowgreen",
+  PCV4 = "hotpink2",
+  PDCoV = "red3",
+  PEDV = "cyan3",
+  PRRSV = "blue3",
+  PRV = "purple4",
+  SIV = "darkorange",
+  
+  # Molecular-specific viruses
+  PEV = "violet",
+  PTV = "turquoise4",
+  TTV = "goldenrod4",
+  PAstV = "cyan4",
+  MRV2 = "magenta3",
+  PSV = "salmon4",
+  PToV = "aquamarine2",
+  
+  # Serological-specific viruses
+  AIV = "orchid3",
+  EMCV = "steelblue4",
+  SaV = "tan3",
+  PPV = "seagreen4",
+  SFTSV = "plum3",
+  GETV = "bisque1",
+  JEV = "lightblue3",
+  ASFV = "firebrick",
+  PCLV = "rosybrown2",
+  PHEV = "lightsteelblue",
+  
+  # Others category
+  Others = "grey67",
+  Multiple = "slategray1"
+)
+
+## 3. Create molecular combined plots
+pathogen_molec_colors <- pathogen_colors
+
+## 4. Create serological combined plots
+pathogen_sero_colors <- pathogen_colors
+
+## -------- export
+## molecular 
+
+combined_donut_map_molec <- create_combined_plot(
+  data = province_virus_profile_molec,
+  data_2 = province_profile_molec,
+  colors = pathogen_molec_colors,
+  china = china,
+  output_file = "figures/Figure_7_province_virus_profile_molec.tiff"
+)
+
+combined_donut_map_molec <- create_combined_plot(
+  data = province_virus_profile_molec,
+  data_2 = province_profile_molec,
+  colors = pathogen_molec_colors,
+  china = china,
+  output_file = "figures/Figure_7_province_virus_profile_molec.jpg"
+)
+
+combined_donut_map_molec <- create_combined_plot(
+  data = province_virus_profile_molec,
+  data_2 = province_profile_molec,
+  colors = pathogen_molec_colors,
+  china = china,
+  output_file = "figures/Figure_7_province_virus_profile_molec.pdf"
+)
+
+## serological
+
+combined_donut_map_sero <- create_combined_plot(
+  data = province_virus_profile_sero,
+  data_2 = province_profile_sero,
+  colors = pathogen_sero_colors,
+  china = china,
+  output_file = "figures/Figure_8_province_virus_profile_sero.tiff"
+)
+
+combined_donut_map_sero <- create_combined_plot(
+  data = province_virus_profile_sero,
+  data_2 = province_profile_sero,
+  colors = pathogen_sero_colors,
+  china = china,
+  output_file = "figures/Figure_8_province_virus_profile_sero.jpg"
+)
+
+combined_donut_map_sero <- create_combined_plot(
+  data = province_virus_profile_sero,
+  data_2 = province_profile_sero,
+  colors = pathogen_sero_colors,
+  china = china,
+  output_file = "figures/Figure_8_province_virus_profile_sero.pdf"
+)
+
+#print(combined_donut_map_sero)
+
+###----------------- Province-Level Prevalence with Meta-Analysis -------------------###
+library(tidyverse)
+library(meta)
+library(sf)
+library(ggplot2)
+library(viridis)
+library(patchwork)
+library(ragg)
+
+## ============================================================================
+## FUNCTION: Create Province Profile with Meta-Analysis
+## ============================================================================
+create_province_profile <- function(data) {
+  
+  total_pub_ID <- n_distinct(data$pub_ID)
+  
+  # Step 1: Basic descriptive statistics
+  province_descriptive <- data %>%
+    group_by(province) %>%
+    summarise(
+      frequency_pub_ID = n_distinct(pub_ID),
+      sample_number = sum(sample_size, na.rm = TRUE),
+      total_positive = sum(positive_sample, na.rm = TRUE),
+      crude_prevalence = ifelse(sample_number > 0, total_positive / sample_number, NA),
+      min_sampling_year = min(sampling_year, na.rm = TRUE),
+      max_sampling_year = max(sampling_year, na.rm = TRUE),
+      total_pub_ID = total_pub_ID,
+      .groups = "drop"
+    )
+  
+  # Step 2: Meta-analyzed pooled prevalence by province
+  province_meta <- data %>%
+    group_by(province) %>%
+    filter(n() >= 2) %>%  # Need at least 2 observations for meta-analysis
+    group_modify(~ {
+      
+      # Skip if insufficient data
+      if (nrow(.x) < 2) return(tibble())
+      
+      tryCatch({
+        # Perform meta-analysis with logit transformation
+        meta_res <- metaprop(
+          event = .x$positive_sample,
+          n = .x$sample_size,
+          studlab = .x$pub_ID,
+          sm = "PLOGIT",
+          method = "Inverse",
+          method.tau = "REML",
+          comb.random = TRUE,
+          comb.fixed = FALSE,
+          hakn = TRUE
+        )
+        
+        # Extract pooled estimate and back-transform from logit
+        tibble(
+          pooled_prevalence = plogis(meta_res$TE.random),
+          pooled_lower_CI = plogis(meta_res$lower.random),
+          pooled_upper_CI = plogis(meta_res$upper.random),
+          I2 = meta_res$I2,
+          tau2 = meta_res$tau^2,
+          n_studies_meta = meta_res$k
+        )
+      }, error = function(e) {
+        # If meta-analysis fails, return NA
+        tibble(
+          pooled_prevalence = NA,
+          pooled_lower_CI = NA,
+          pooled_upper_CI = NA,
+          I2 = NA,
+          tau2 = NA,
+          n_studies_meta = NA
+        )
+      })
+    }) %>%
+    ungroup()
+  
+  # Step 3: Merge descriptive and meta-analyzed results
+  province_profile <- province_descriptive %>%
+    left_join(province_meta, by = "province") %>%
+    mutate(
+      # Use pooled prevalence if available, otherwise crude
+      average_prevalence = coalesce(pooled_prevalence, crude_prevalence),
+      prevalence_type = case_when(
+        !is.na(pooled_prevalence) ~ "Meta-analyzed",
+        !is.na(crude_prevalence) ~ "Crude (single study)",
+        TRUE ~ "No data"
+      ),
+      # Create formatted CI string
+      prevalence_CI = ifelse(
+        !is.na(pooled_lower_CI),
+        paste0(round(average_prevalence, 3), " (", 
+               round(pooled_lower_CI, 3), "-", 
+               round(pooled_upper_CI, 3), ")"),
+        as.character(round(average_prevalence, 3))
+      )
+    )
+  
+  return(province_profile)
+}
+
+## ============================================================================
+## Create Province Profile Dataframes
+## ============================================================================
+dataset_names <- ls(pattern = "^df_")
+
+for(ds_name in dataset_names) {
+  data <- get(ds_name)
+  
+  # Skip datasets with fewer than 5 publications
+  if(n_distinct(data$pub_ID) < 5) {
+    message(paste("⏩ Skipping", ds_name, "- fewer than 5 unique publications"))
+    next
+  }
+  
+  # Create province profile with meta-analysis
+  province_profile <- create_province_profile(data)
+  
+  # Generate appropriate name
+  virus_name <- str_remove(ds_name, "^df_molecular_|^df_serological_")
+  suffix <- if(str_detect(ds_name, "molecular")) "_mol" else "_sero"
+  new_name <- paste0("province_profile_", virus_name, suffix)
+  
+  # Assign to global environment
+  assign(new_name, province_profile, envir = .GlobalEnv)
+  
+  # Summary message
+  n_meta <- sum(!is.na(province_profile$pooled_prevalence))
+  n_crude <- sum(is.na(province_profile$pooled_prevalence) & !is.na(province_profile$crude_prevalence))
+  message(paste0("✅ Created ", new_name, 
+                 " (", n_meta, " meta-analyzed, ", n_crude, " crude prevalence)"))
+}
+
+## ============================================================================
+## FUNCTION: Create Individual Prevalence Maps
+## ============================================================================
+create_prevalence_map_indv <- function(province_data, china, dataset_name, output_directory) {
+  
+  # Join province data with shapefile
+  china_prevalence <- china %>%
+    left_join(province_data, by = c("province_shp" = "province"))
+  
+  # Calculate summary statistics
+  total_positive_sum <- sum(province_data$total_positive, na.rm = TRUE)
+  total_sample_sum   <- sum(province_data$sample_number, na.rm = TRUE)
+  overall_min_year   <- min(province_data$min_sampling_year, na.rm = TRUE)
+  overall_max_year   <- max(province_data$max_sampling_year, na.rm = TRUE)
+  num_studies        <- max(province_data$total_pub_ID, na.rm = TRUE)
+  n_meta_provinces   <- sum(!is.na(province_data$pooled_prevalence))
+  n_total_provinces  <- sum(!is.na(province_data$average_prevalence))
+  
+  # Extract virus name for title
+  virus_label <- str_extract(dataset_name, "(?<=_)[^_]+$")
+  
+  # Create annotation label
+  label_text <- paste(
+    paste0("Average prevalence of ", virus_label),
+    paste0("Number of studies: ", num_studies),
+    paste0("Total positive/total samples: ", total_positive_sum, "/", total_sample_sum),
+    paste0("Period: ", overall_min_year, "–", overall_max_year),
+    paste0("Provinces: ", n_meta_provinces, " meta-analyzed, ", 
+           n_total_provinces - n_meta_provinces, " crude"),
+    "Prevalence estimated using random-effects meta-analysis where ≥2 studies available",
+    sep = "\n"
+  )
+  
+  # Get bounding box for annotation placement
+  bbox  <- sf::st_bbox(china)
+  xr    <- bbox$xmax - bbox$xmin
+  yr    <- bbox$ymax - bbox$ymin
+  x_off <- 0.975
+  y_off <- 0.975
+  
+  # Create map
+  map_plot <- ggplot(data = china_prevalence) +
+    geom_sf(aes(fill = average_prevalence), color = "black", size = 0.2) +
+    scale_fill_viridis_c(
+      option = "plasma",
+      direction = -1,
+      name = "Prevalence",
+      na.value = "grey85",
+      limits = c(0, 1),
+      labels = scales::percent_format(accuracy = 1)
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = c(0.95, 0.5),
+      legend.justification = c(1, 0.5),
+      legend.title = element_text(size = 11, family = "sans", face = "bold"),
+      legend.text  = element_text(size = 10, family = "sans"),
+      plot.margin  = margin(0.5, 0.5, 0.5, 0.5, unit = "cm"),
+      legend.background = element_rect(fill = "white", color = "grey50", size = 0.2),
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.grid.major = element_line(color = "grey90", size = 0.2),
+      panel.grid.minor = element_blank(),
+      text = element_text(family = "sans")
+    ) +
+    annotate(
+      "text",
+      x = bbox$xmin + xr * 0.02,
+      y = bbox$ymin + yr * 0.02,
+      label = label_text,
+      hjust = 0, 
+      vjust = 0,
+      lineheight = 1.1,
+      size = 3.2,
+      family = "sans",
+      color = "black"
+    )
+
+  ggsave(
+    filename = file.path(output_directory, paste0("prev_map_", dataset_name, ".tiff")),
+    plot = map_plot,
+    width = 12,
+    height = 10,
+    units = "in",
+    dpi = 600,
+    device = ragg::agg_tiff,
+    compression = "lzw",
+    bg = "white"
+  )
+  
+  # PDF
+  ggsave(
+    filename = file.path(output_directory, paste0("prev_map_", dataset_name, ".pdf")),
+    plot = map_plot,
+    width = 12,
+    height = 10,
+    units = "in"
+  )
+  
+  # JPG
+  ggsave(
+    filename = file.path(output_directory, paste0("prev_map_", dataset_name, ".jpg")),
+    plot = map_plot,
+    width = 12,
+    height = 10,
+    units = "in",
+    dpi = 600
+  )
+  
+  return(map_plot)
+}
+
+## ============================================================================
+## Export Individual Maps
+## ============================================================================
+output_directory <- "figures/provincial_profiles"
+dir.create(output_directory, recursive = TRUE, showWarnings = FALSE)
+
+dataset_names <- ls(pattern = "^df_")
+
+for (dataset_name in dataset_names) {
+  data <- get(dataset_name)
+  
+  # Skip if fewer than 5 studies
+  if (n_distinct(data$pub_ID) < 5) {
+    next
+  }
+  
+  # Create province profile
+  province_profile <- create_province_profile(data)
+  
+  # Create and save map
+  tryCatch({
+    individual_map <- create_prevalence_map_indv(
+      province_data = province_profile,
+      china = china,
+      dataset_name = dataset_name,
+      output_directory = output_directory
+    )
+  }, error = function(e) {
+    message(paste0("❌ Error creating map for ", dataset_name, ": ", e$message))
+  })
+}
+
+message("\n🎉 All prevalence maps generated!")
+
+## ============================================================================
+## Optional: Export Province Statistics to CSV
+## ============================================================================
+export_province_statistics <- function() {
+  
+  # Create output directory
+  if (!dir.exists("output/statistics")) {
+    dir.create("output/statistics", recursive = TRUE)
+  }
+  
+  # Get all province profile datasets
+  profile_names <- ls(pattern = "^province_profile_", envir = .GlobalEnv)
+  
+  for (profile_name in profile_names) {
+    province_data <- get(profile_name, envir = .GlobalEnv)
+    
+    # Export to CSV
+    write.csv(
+      province_data,
+      file.path("output/province_statistics", paste0(profile_name, ".csv")),
+      row.names = FALSE
+    )
+  }
+  
+  message(paste0("✅ Exported ", length(profile_names), " province statistics files"))
+}
+
+# Uncomment to export statistics
+# export_province_statistics()
+
+##-------- Function to create individual virus maps for patchwork ----------- ##
+
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(patchwork)
+library(stringr)
+library(viridis)
+library(ragg) 
+
+create_prevalence_maps <- function(province_data, china, dataset_name = NULL) {
+  # Use provided dataset_name or fallback to object name
+  if (is.null(dataset_name)) {
+    dataset_name <- deparse(substitute(province_data))
+  }
+  
+  # Determine virus name
+  virus_name <- dataset_name %>%
+    str_remove("^province_profile_") %>%
+    str_remove("_mol$|_sero$")
+  
+  # Determine study type for title
+  study_type <- if (str_detect(dataset_name, "_mol$")) "Molecular" else "Serological"
+  
+  # Append to title
+  full_title <- paste0(virus_name, " (", study_type, ")")
+  
+  # Identify virus columns
+  virus_groups <- province_data %>%
+    select(starts_with("average_prevalence")) %>%
+    colnames()
+  
+  if (length(virus_groups) == 0) {
+    warning(paste("No columns starting with 'average_prevalence' found in", dataset_name))
+    return(list())
+  }
+  
+  map_list <- lapply(virus_groups, function(virus_group) {
+    virus_prevalence_df <- province_data %>%
+      select(province, matches(virus_group), frequency_pub_ID, total_positive, sample_number, min_sampling_year, max_sampling_year, total_pub_ID) %>%
+      rename(prevalence = !!virus_group)
+    
+    if (nrow(virus_prevalence_df) == 0) return(NULL)
+    
+    china_prevalence <- china %>%
+      left_join(virus_prevalence_df, by = c("province_shp" = "province"))
+    
+    total_positive_sum <- sum(virus_prevalence_df$total_positive, na.rm = TRUE)
+    total_sample_sum   <- sum(virus_prevalence_df$sample_number, na.rm = TRUE)
+    overall_min_year   <- min(province_data$min_sampling_year, na.rm = TRUE)
+    overall_max_year   <- max(province_data$max_sampling_year, na.rm = TRUE)
+    num_studies        <- max(virus_prevalence_df$total_pub_ID, na.rm = TRUE)
+    
+    label_text <- paste0(
+      "Number of studies: ", num_studies, "\n",
+      "Sum of total positive: ", total_positive_sum, "\n",
+      "Sum of total samples: ", total_sample_sum, "\n",
+      "Period: ", overall_min_year, "-", overall_max_year
+    )
+    
+    ggplot(china_prevalence) +
+      geom_sf(aes(fill = prevalence), color = "black", size = 0.2) +
+      scale_fill_viridis_c(
+        option = "plasma",
+        direction = -1,
+        name = "Average prevalence  ",
+        na.value = "grey85",
+        limits = c(0, 1),
+        guide = guide_colorbar(barwidth = 15)
+      ) +
+      # Set base_family and base_size for consistent TIFF text rendering
+      theme_minimal(base_family = "sans", base_size = 10) +
+      theme(
+        legend.position = "bottom",
+        legend.title = element_text(size = 12),
+        legend.text  = element_text(size = 12),
+        plot.title   = element_text(size = 12),
+        plot.subtitle= element_text(size = 12),
+        panel.grid   = element_line(color = "grey90", size = 0.2)
+      ) +
+      labs(title = full_title, subtitle = label_text)
+  })
+  
+  # Remove NULL maps
+  map_list <- map_list[!sapply(map_list, is.null)]
+  return(map_list)
+}
+
+# ----- Generate maps for all datasets automatically
+dataset_list <- c(
+  "province_profile_HEV_mol",
+  "province_profile_PCV2_mol",
+  "province_profile_PCV3_mol",
+  "province_profile_PDCoV_mol",
+  "province_profile_PEDV_mol",
+  "province_profile_PKoV_mol",
+  "province_profile_PoRV_mol",
+  "province_profile_PRRSV_mol",
+  "province_profile_TGEV_mol",
+  "province_profile_HEV_sero",
+  "province_profile_IAV_H1N1_sero",
+  "province_profile_PRV_sero"
+)
+
+china <- load_shapefile()
+
+all_maps <- lapply(dataset_list, function(ds) {
+  create_prevalence_maps(get(ds), china, dataset_name = ds)
+})
+
+# Flatten the list and remove NULLs
+all_maps <- unlist(all_maps, recursive = FALSE)
+all_maps <- all_maps[!sapply(all_maps, is.null)]
+
+if (length(all_maps) == 0) {
+  stop("No valid maps were generated. Check your data and column names!")
+}
+
+# ------- Combine all maps into a single patchwork
+combined_maps <- wrap_plots(all_maps, ncol = 3) +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom", text = element_text(family = "sans"))
+
+print(combined_maps)
+
+# Export
+ggsave(
+  filename = "figures/Figure_9_prev_maps.tiff",
+  plot = combined_maps,
+  width = 12, height = 16, units = "in",
+  dpi = 300,
+  device = ragg::agg_tiff,
+  compression = "lzw",
+  bg = "white"
+)
+
+ggsave(
+  filename = "figures/Figure_9_prev_maps.jpg",
+  plot = combined_maps,
+  width = 12, 
+  height = 16, 
+  units = "in",
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  filename = "figures/Figure_9_prev_maps.pdf",
+  plot = combined_maps,
+  width = 12, 
+  height = 16, 
+  units = "in",
+  dpi = 300,
+  bg = "white"
+)
