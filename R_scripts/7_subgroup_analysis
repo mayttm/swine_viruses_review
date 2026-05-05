@@ -1,0 +1,1132 @@
+## ========================================================================== ##
+## ------------------------- SUBGROUP ANALYSES ------------------------------ ##
+
+## ------------------------------- pig type --------------------------------- ##
+
+library(meta)
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+# Create output directory for statistics
+dir.create("output/statistics", recursive = TRUE, showWarnings = FALSE)
+
+# Initialize data frame to collect ALL statistics (including those not meeting criteria)
+all_summary <- data.frame(
+  dataset = character(),
+  pig_type = character(),
+  n_studies = integer(),
+  I2 = numeric(),
+  required_studies = integer(),
+  meets_individual_criteria = character(),
+  n_categories_meeting_criteria = integer(),
+  meets_overall_criteria = character(),
+  reason_excluded = character(),
+  stringsAsFactors = FALSE
+)
+
+dataset_names <- ls(pattern = "^df_")
+
+# Initialize data frame for Q-test results (add at the top with all_summary)
+q_test_pig_type <- data.frame(
+  dataset = character(),
+  subgroup_variable = character(),
+  reference_category = character(),
+  n_subgroups = integer(),
+  Q_between = numeric(),
+  df = numeric(),
+  p_value = numeric(),
+  interpretation = character(),
+  stringsAsFactors = FALSE
+)
+
+for (dataset_name in dataset_names) {
+  data <- get(dataset_name)
+  # Check required columns
+  if(!all(c("pig_type", "positive_sample", "sample_size", "pub_ID", "sampling_year", "diag_test_details") %in% colnames(data))) {
+    message(paste0("⚠ Skipping ", dataset_name, " — missing required columns"))
+    # Record reason for exclusion
+    all_summary <- rbind(all_summary, data.frame(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      pig_type = "N/A",
+      n_studies = 0,
+      I2 = NA,
+      required_studies = NA,
+      meets_individual_criteria = "No",
+      n_categories_meeting_criteria = 0,
+      meets_overall_criteria = "No",
+      reason_excluded = "Missing required columns",
+      stringsAsFactors = FALSE
+    ))
+    next
+  }
+  # Filter data: remove NA/blank pig_type and require sample_size >= 30
+  data_filtered <- data %>%
+    filter(!is.na(pig_type),
+           str_trim(pig_type) != "",
+           sample_size >= 30)
+  if (nrow(data_filtered) == 0) {
+    message(paste0("⚠ Skipping ", dataset_name, " — no valid pig_type"))
+    all_summary <- rbind(all_summary, data.frame(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      pig_type = "N/A",
+      n_studies = 0,
+      I2 = NA,
+      required_studies = NA,
+      meets_individual_criteria = "No",
+      n_categories_meeting_criteria = 0,
+      meets_overall_criteria = "No",
+      reason_excluded = "No valid pig_type data",
+      stringsAsFactors = FALSE
+    ))
+    next
+  }
+  # Calculate prevalence
+  data_filtered <- data_filtered %>% mutate(prevalence = positive_sample / sample_size)
+  # ✅ Calculate I² for ALL pig_types (before filtering)
+  pig_type_stats <- data.frame(
+    pig_type = character(),
+    n_studies = integer(),
+    I2 = numeric(),
+    stringsAsFactors = FALSE
+  )
+  for(pt in unique(data_filtered$pig_type)) {
+    pt_data <- data_filtered %>% filter(pig_type == pt)
+    n_pubs <- n_distinct(pt_data$pub_ID)
+    # ✅ Require at least 3 independent studies (pub_IDs) per category
+    if(n_pubs >= 3) {
+      tryCatch({
+        temp_meta <- metaprop(
+          event = positive_sample,
+          n = sample_size,
+          studlab = paste(pub_ID),
+          data = pt_data,
+          sm = "PLOGIT",
+          method = "Inverse",
+          method.tau = "REML",
+          comb.fixed = FALSE,
+          comb.random = TRUE
+        )
+        pig_type_stats <- rbind(pig_type_stats, data.frame(
+          pig_type = pt,
+          n_studies = n_pubs,  # ✅ Changed to count pub_IDs, not rows
+          I2 = temp_meta$I2,
+          stringsAsFactors = FALSE
+        ))
+      }, error = function(e) {
+        pig_type_stats <- rbind(pig_type_stats, data.frame(
+          pig_type = pt,
+          n_studies = n_pubs,
+          I2 = NA,
+          stringsAsFactors = FALSE
+        ))
+        message(paste0("⚠ Could not calculate I² for ", pt, " in ", dataset_name))
+      })
+    } else {
+      # ✅ Record categories with insufficient pub_IDs
+      pig_type_stats <- rbind(pig_type_stats, data.frame(
+        pig_type = pt,
+        n_studies = n_pubs,
+        I2 = NA,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  # ✅ Apply criteria based on I²
+  pig_type_stats <- pig_type_stats %>%
+    mutate(
+      required_studies = ifelse(is.na(I2), 5, ifelse(I2 < 50, 3, 5)),
+      meets_individual_criteria = n_studies >= required_studies
+    )
+  # Count how many categories meet criteria
+  n_categories_meeting <- sum(pig_type_stats$meets_individual_criteria, na.rm = TRUE)
+  # Determine overall eligibility
+  overall_meets <- n_categories_meeting >= 2
+  # Determine reason for exclusion if not meeting criteria
+  if(!overall_meets) {
+    if(n_categories_meeting == 0) {
+      reason <- "No pig_type categories meet study number criteria"
+    } else if(n_categories_meeting == 1) {
+      reason <- "Only 1 pig_type category meets criteria (need ≥2)"
+    } else {
+      reason <- "Other criteria not met"
+    }
+  } else {
+    # Check for zero-event subgroups in eligible categories
+    valid_pig_types <- pig_type_stats %>%
+      filter(meets_individual_criteria) %>%
+      pull(pig_type)
+    data_check <- data_filtered %>% filter(pig_type %in% valid_pig_types)
+    zero_event <- data_check %>%
+      group_by(pig_type) %>%
+      summarise(total_events = sum(positive_sample)) %>%
+      filter(total_events == 0)
+    if(nrow(zero_event) > 0) {
+      reason <- paste0("Zero events in categories: ", paste(zero_event$pig_type, collapse = ", "))
+      overall_meets <- FALSE
+    } else {
+      reason <- "Meets all criteria"
+    }
+  }
+  # ✅ Store ALL statistics for this dataset
+  temp_summary <- pig_type_stats %>%
+    mutate(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      n_categories_meeting_criteria = n_categories_meeting,
+      meets_overall_criteria = ifelse(overall_meets, "Yes", "No"),
+      reason_excluded = reason,
+      meets_individual_criteria = ifelse(meets_individual_criteria, "Yes", "No")
+    ) %>%
+    select(dataset, pig_type, n_studies, I2, required_studies,
+           meets_individual_criteria, n_categories_meeting_criteria,
+           meets_overall_criteria, reason_excluded)
+  all_summary <- rbind(all_summary, temp_summary)
+  # ✅ Continue with analysis ONLY if criteria met
+  if(!overall_meets) {
+    message(paste0("⚠ Skipping ", dataset_name, " — ", reason))
+    next
+  }
+  # Filter to eligible pig_types
+  valid_pig_types <- pig_type_stats %>%
+    filter(meets_individual_criteria) %>%
+    pull(pig_type)
+  data_filtered <- data_filtered %>% filter(pig_type %in% valid_pig_types)
+  # Keep pig_types with total sample size > 1
+  size_counts <- data_filtered %>%
+    group_by(pig_type) %>%
+    summarise(total_sample = sum(sample_size), .groups = "drop")
+  valid_pig_types <- size_counts %>%
+    filter(total_sample > 1) %>%
+    pull(pig_type)
+  data_filtered <- data_filtered %>% filter(pig_type %in% valid_pig_types)
+  # ✅ Set reference category based on biological relevance
+  pig_type_sizes <- data_filtered %>%
+    group_by(pig_type) %>%
+    summarise(total_n = sum(sample_size), .groups = "drop") %>%
+    arrange(desc(total_n))
+  if("suckling" %in% tolower(pig_type_sizes$pig_type)) {
+    ref_pig_type <- pig_type_sizes$pig_type[tolower(pig_type_sizes$pig_type) == "suckling"][1]
+    ref_reason <- "biological relevance (earliest growth stage)"
+  } else {
+    ref_pig_type <- pig_type_sizes$pig_type[1]
+    ref_reason <- "largest sample size (pragmatic choice)"
+  }
+  # Relevel pig_type to set reference
+  data_filtered <- data_filtered %>%
+    mutate(pig_type = factor(pig_type, levels = c(ref_pig_type, setdiff(unique(pig_type), ref_pig_type))))
+  message(paste0("ℹ Reference category for ", dataset_name, ": ", ref_pig_type, " (", ref_reason, ")"))
+  message(paste0("ℹ Included pig types: ", paste(unique(data_filtered$pig_type), collapse = ", ")))
+  # Create export folder
+  export_path <- "figures/subgroup/or_pig_type/prevalence/"
+  dir.create(export_path, recursive = TRUE, showWarnings = FALSE)
+  tryCatch({
+    # ✅ Run subgroup meta-analysis
+    meta_res <- metaprop(
+      event = positive_sample,
+      n = sample_size,
+      studlab = paste(pub_ID),
+      data = data_filtered,
+      sm = "PLOGIT",
+      method = "Inverse",
+      method.tau = "REML",
+      comb.fixed = FALSE,
+      comb.random = TRUE,
+      byvar = pig_type,
+      print.byvar = TRUE,
+      overall = FALSE
+    )
+    
+    # ✅ Extract Q-test statistics for subgroup differences
+    q_between <- meta_res$Q.b.random
+    q_df <- meta_res$df.Q.b
+    q_pval <- meta_res$pval.Q.b.random
+    n_subgroups <- length(unique(data_filtered$pig_type))
+    
+    # Determine significance
+    interpretation <- ifelse(is.na(q_pval), "Could not calculate", 
+                             ifelse(q_pval < 0.001, "Highly significant difference (p<0.001)",
+                                    ifelse(q_pval < 0.01, "Very significant difference (p<0.01)",
+                                           ifelse(q_pval < 0.05, "Significant difference (p<0.05)",
+                                                  "No significant difference (p≥0.05)"))))
+    
+    # Store Q-test results
+    q_test_pig_type <- rbind(q_test_pig_type, data.frame(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      subgroup_variable = "pig_type",
+      reference_category = ref_pig_type,
+      n_subgroups = n_subgroups,
+      Q_between = round(q_between, 3),
+      df = q_df,
+      p_value = round(q_pval, 4),
+      interpretation = interpretation,
+      stringsAsFactors = FALSE
+    ))
+    
+    message(paste0("ℹ Q-test: Q=", round(q_between, 2), ", df=", q_df, 
+                   ", p=", round(q_pval, 4), " — ", interpretation))
+    
+    # Clean title for plotting
+    plot_title <- dataset_name %>%
+      str_replace("^df_", "") %>%
+      str_replace_all("_", " ")
+    # Zebra-style shading per pub_ID
+    shade_groups <- as.numeric(factor(data_filtered$pub_ID)) %% 2 != 0
+    # Dynamic sizing
+    n_studies <- nrow(data_filtered)
+    cex_value <- min(0.9, 800 / n_studies + 20)
+    mar_bottom <- max(2, 2 + n_studies * 0.5)
+    mar_left <- max(1, 1 + n_studies * 0.05)
+    png_width <- 4000
+    png_height <- max(2800, n_studies * 100)
+    # Export forest plot
+    png_file <- paste0(export_path, "or_", dataset_name, ".png")
+    png(filename = png_file, width = png_width, height = png_height, res = 300)
+    par(mar = c(mar_bottom, mar_left, 4, 10))
+    forest(
+      meta_res,
+      sortvar = data_filtered$sampling_year,
+      smlab = "Pooled Prevalence",
+      leftcols = c("studlab", "diag_test_details", "sampling_year", "n"),
+      leftlabs = c("Study", "Diagnostic Test", "Sampling Year", "Sample Size"),
+      rightcols = c("effect", "ci", "w.random"),
+      rightlabs = c("Prevalence", "95% CI", "Weight"),
+      comb.fixed = FALSE,
+      comb.random = TRUE,
+      overall = FALSE,
+      text.random = "Pooled Prevalence",
+      prediction = TRUE,
+      col.predict = "darkblue",
+      col.diamond = "red",
+      col.diamond.lines = "black",
+      shade = shade_groups,
+      print.byvar = TRUE,
+      print.tau2 = TRUE,
+      print.I2 = TRUE,
+      xlab = "Prevalence",
+      xlim = c(0, 1),
+      main = paste("Forest Plot -", plot_title, "(PR) | Ref:", ref_pig_type),
+      just = "center",
+      cex = cex_value,
+      spacing = 1.15
+    )
+    dev.off()
+    message(paste0("✅ Forest plot created for ", dataset_name, " (", n_studies, " studies)"))
+  }, error = function(e) {
+    message(paste0("⚠ Meta-analysis failed for ", dataset_name, ": ", e$message))
+  })
+}
+
+# ✅ Export comprehensive summary statistics
+if(nrow(all_summary) > 0) {
+  # Sort by dataset and whether criteria met
+  all_summary <- all_summary %>%
+    arrange(meets_overall_criteria %>% desc(), dataset, pig_type)
+  write.csv(all_summary,
+            "output/statistics/pig_type_subgroup_criteria_complete.csv",
+            row.names = FALSE)
+  message("✅ Complete statistics exported to output/statistics/pig_type_subgroup_criteria_complete.csv")
+  # Also create a summary by dataset
+  dataset_summary <- all_summary %>%
+    group_by(dataset) %>%
+    summarise(
+      n_pig_types = n(),
+      n_meeting_individual = sum(meets_individual_criteria == "Yes", na.rm = TRUE),
+      meets_overall = first(meets_overall_criteria),
+      reason = first(reason_excluded),
+      .groups = "drop"
+    ) %>%
+    arrange(meets_overall %>% desc(), dataset)
+  write.csv(dataset_summary,
+            "output/statistics/pig_type_subgroup_summary_by_virus.csv",
+            row.names = FALSE)
+  message("✅ Summary by virus exported to output/statistics/pig_type_subgroup_summary_by_virus.csv")
+} else {
+  message("⚠ No statistics to export")
+}
+
+# ✅ Export Q-test statistics
+if(nrow(q_test_pig_type) > 0) {
+  q_test_pig_type <- q_test_pig_type %>%
+    arrange(p_value)
+  write.csv(q_test_pig_type,
+            "output/statistics/pig_type_q_test_results.csv",
+            row.names = FALSE)
+  message("✅ Q-test results exported to output/statistics/pig_type_q_test_results.csv")
+} else {
+  message("⚠ No Q-test results to export")
+}
+
+#######--------------------------- province --------------------------------####
+library(meta)
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+# Create output directory for statistics
+dir.create("output/statistics", recursive = TRUE, showWarnings = FALSE)
+
+# Initialize data frame to collect ALL statistics (including those not meeting criteria)
+all_summary_province <- data.frame(
+  dataset = character(),
+  province = character(),
+  n_studies = integer(),
+  I2 = numeric(),
+  required_studies = integer(),
+  meets_individual_criteria = character(),
+  n_categories_meeting_criteria = integer(),
+  meets_overall_criteria = character(),
+  reason_excluded = character(),
+  stringsAsFactors = FALSE
+)
+
+# Initialize data frame for Q-test results
+q_test_province <- data.frame(
+  dataset = character(),
+  subgroup_variable = character(),
+  reference_category = character(),
+  n_subgroups = integer(),
+  Q_between = numeric(),
+  df = numeric(),
+  p_value = numeric(),
+  interpretation = character(),
+  stringsAsFactors = FALSE
+)
+
+dataset_names <- ls(pattern = "^df_")
+
+for (dataset_name in dataset_names) {
+  data <- get(dataset_name)
+  
+  # Check required columns
+  if(!all(c("province", "positive_sample", "sample_size", "pub_ID", "sampling_year", "diag_test_details") %in% colnames(data))) {
+    message(paste0("⚠ Skipping ", dataset_name, " — missing required columns"))
+    # Record reason for exclusion
+    all_summary_province <- rbind(all_summary_province, data.frame(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      province = "N/A",
+      n_studies = 0,
+      I2 = NA,
+      required_studies = NA,
+      meets_individual_criteria = "No",
+      n_categories_meeting_criteria = 0,
+      meets_overall_criteria = "No",
+      reason_excluded = "Missing required columns",
+      stringsAsFactors = FALSE
+    ))
+    next
+  }
+  
+  # Filter data: remove NA/blank province and require sample_size >= 30
+  data_filtered <- data %>%
+    filter(!is.na(province),
+           str_trim(province) != "",
+           sample_size >= 30,
+           diag_test != "Virus_isolation")
+  
+  if (nrow(data_filtered) == 0) {
+    message(paste0("⚠ Skipping ", dataset_name, " — no valid province"))
+    all_summary_province <- rbind(all_summary_province, data.frame(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      province = "N/A",
+      n_studies = 0,
+      I2 = NA,
+      required_studies = NA,
+      meets_individual_criteria = "No",
+      n_categories_meeting_criteria = 0,
+      meets_overall_criteria = "No",
+      reason_excluded = "No valid province data",
+      stringsAsFactors = FALSE
+    ))
+    next
+  }
+  
+  # Calculate prevalence
+  data_filtered <- data_filtered %>% mutate(prevalence = positive_sample / sample_size)
+  
+  # ✅ Calculate I² for ALL provinces (before filtering)
+  province_stats <- data.frame(
+    province = character(),
+    n_studies = integer(),
+    I2 = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  for(prov in unique(data_filtered$province)) {
+    prov_data <- data_filtered %>% filter(province == prov)
+    n_pubs <- n_distinct(prov_data$pub_ID)
+    
+    # ✅ Require at least 3 independent studies (pub_IDs) per category
+    if(n_pubs >= 3) {
+      tryCatch({
+        temp_meta <- metaprop(
+          event = positive_sample,
+          n = sample_size,
+          studlab = paste(pub_ID),
+          data = prov_data,
+          sm = "PLOGIT",
+          method = "Inverse",
+          method.tau = "REML",
+          comb.fixed = FALSE,
+          comb.random = TRUE
+        )
+        province_stats <- rbind(province_stats, data.frame(
+          province = prov,
+          n_studies = n_pubs,  # ✅ Count pub_IDs, not rows
+          I2 = temp_meta$I2,
+          stringsAsFactors = FALSE
+        ))
+      }, error = function(e) {
+        province_stats <- rbind(province_stats, data.frame(
+          province = prov,
+          n_studies = n_pubs,
+          I2 = NA,
+          stringsAsFactors = FALSE
+        ))
+        message(paste0("⚠ Could not calculate I² for ", prov, " in ", dataset_name))
+      })
+    } else {
+      # ✅ Record provinces with insufficient pub_IDs
+      province_stats <- rbind(province_stats, data.frame(
+        province = prov,
+        n_studies = n_pubs,
+        I2 = NA,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  # ✅ Apply criteria based on I²
+  province_stats <- province_stats %>%
+    mutate(
+      required_studies = ifelse(is.na(I2), 5, ifelse(I2 < 50, 3, 5)),
+      meets_individual_criteria = n_studies >= required_studies
+    )
+  
+  # Count how many categories meet criteria
+  n_categories_meeting <- sum(province_stats$meets_individual_criteria, na.rm = TRUE)
+  
+  # Determine overall eligibility
+  overall_meets <- n_categories_meeting >= 2
+  
+  # Determine reason for exclusion if not meeting criteria
+  if(!overall_meets) {
+    if(n_categories_meeting == 0) {
+      reason <- "No province categories meet study number criteria"
+    } else if(n_categories_meeting == 1) {
+      reason <- "Only 1 province category meets criteria (need ≥2)"
+    } else {
+      reason <- "Other criteria not met"
+    }
+  } else {
+    # Check for zero-event subgroups in eligible categories
+    valid_provinces <- province_stats %>%
+      filter(meets_individual_criteria) %>%
+      pull(province)
+    
+    data_check <- data_filtered %>% filter(province %in% valid_provinces)
+    
+    zero_event <- data_check %>%
+      group_by(province) %>%
+      summarise(total_events = sum(positive_sample)) %>%
+      filter(total_events == 0)
+    
+    if(nrow(zero_event) > 0) {
+      reason <- paste0("Zero events in categories: ", paste(zero_event$province, collapse = ", "))
+      overall_meets <- FALSE
+    } else {
+      reason <- "Meets all criteria"
+    }
+  }
+  
+  # ✅ Store ALL statistics for this dataset
+  temp_summary <- province_stats %>%
+    mutate(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      n_categories_meeting_criteria = n_categories_meeting,
+      meets_overall_criteria = ifelse(overall_meets, "Yes", "No"),
+      reason_excluded = reason,
+      meets_individual_criteria = ifelse(meets_individual_criteria, "Yes", "No")
+    ) %>%
+    select(dataset, province, n_studies, I2, required_studies,
+           meets_individual_criteria, n_categories_meeting_criteria,
+           meets_overall_criteria, reason_excluded)
+  
+  all_summary_province <- rbind(all_summary_province, temp_summary)
+  
+  # ✅ Continue with analysis ONLY if criteria met
+  if(!overall_meets) {
+    message(paste0("⚠ Skipping ", dataset_name, " — ", reason))
+    next
+  }
+  
+  # Filter to eligible provinces
+  valid_provinces <- province_stats %>%
+    filter(meets_individual_criteria) %>%
+    pull(province)
+  
+  data_filtered <- data_filtered %>% filter(province %in% valid_provinces)
+  
+  # Keep provinces with total sample size > 1
+  size_counts <- data_filtered %>%
+    group_by(province) %>%
+    summarise(total_sample = sum(sample_size), .groups = "drop")
+  
+  valid_provinces <- size_counts %>%
+    filter(total_sample > 1) %>%
+    pull(province)
+  
+  data_filtered <- data_filtered %>% filter(province %in% valid_provinces)
+  
+  # ✅ Set reference category: province with largest sample size
+  province_sizes <- data_filtered %>%
+    group_by(province) %>%
+    summarise(total_n = sum(sample_size), .groups = "drop") %>%
+    arrange(desc(total_n))
+  
+  ref_province <- province_sizes$province[1]
+  
+  # Relevel province to set reference
+  data_filtered <- data_filtered %>%
+    mutate(province = factor(province, levels = c(ref_province, setdiff(unique(province), ref_province))))
+  
+  message(paste0("ℹ Reference category for ", dataset_name, ": ", ref_province,
+                 " (n=", province_sizes$total_n[1], ", largest sample size)"))
+  message(paste0("ℹ Included provinces: ", paste(unique(data_filtered$province), collapse = ", ")))
+  
+  # Create export folder
+  export_path <- "figures/subgroup/or_province/prevalence/"
+  dir.create(export_path, recursive = TRUE, showWarnings = FALSE)
+  
+  tryCatch({
+    # ✅ Run subgroup meta-analysis
+    meta_res <- metaprop(
+      event = positive_sample,
+      n = sample_size,
+      studlab = paste(pub_ID),
+      data = data_filtered,
+      sm = "PLOGIT",
+      method = "Inverse",
+      method.tau = "REML",
+      comb.fixed = FALSE,
+      comb.random = TRUE,
+      byvar = province,
+      print.byvar = TRUE,
+      overall = FALSE
+    )
+    
+    # ✅ Extract Q-test statistics for subgroup differences
+    q_between <- meta_res$Q.b.random
+    q_df <- meta_res$df.Q.b
+    q_pval <- meta_res$pval.Q.b.random
+    n_subgroups <- length(unique(data_filtered$province))
+    
+    # Determine significance
+    interpretation <- ifelse(is.na(q_pval), "Could not calculate", 
+                             ifelse(q_pval < 0.001, "Highly significant difference (p<0.001)",
+                                    ifelse(q_pval < 0.01, "Very significant difference (p<0.01)",
+                                           ifelse(q_pval < 0.05, "Significant difference (p<0.05)",
+                                                  "No significant difference (p≥0.05)"))))
+    
+    # Store Q-test results
+    q_test_province <- rbind(q_test_province, data.frame(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      subgroup_variable = "province",
+      reference_category = ref_province,
+      n_subgroups = n_subgroups,
+      Q_between = round(q_between, 3),
+      df = q_df,
+      p_value = round(q_pval, 4),
+      interpretation = interpretation,
+      stringsAsFactors = FALSE
+    ))
+    
+    message(paste0("ℹ Q-test: Q=", round(q_between, 2), ", df=", q_df, 
+                   ", p=", round(q_pval, 4), " — ", interpretation))
+    
+    # Clean title for plotting
+    plot_title <- dataset_name %>%
+      str_replace("^df_", "") %>%
+      str_replace_all("_", " ")
+    
+    # Zebra-style shading per pub_ID
+    shade_groups <- as.numeric(factor(data_filtered$pub_ID)) %% 2 != 0
+    
+    # Dynamic sizing
+    n_studies <- nrow(data_filtered)
+    cex_value <- min(0.9, 800 / n_studies + 20)
+    mar_bottom <- max(2, 2 + n_studies * 0.5)
+    mar_left <- max(1, 1 + n_studies * 0.05)
+    png_width <- 4000
+    png_height <- max(2800, n_studies * 120)
+    
+    # Export forest plot
+    png_file <- paste0(export_path, "or_", dataset_name, ".png")
+    png(filename = png_file, width = png_width, height = png_height, res = 300)
+    par(mar = c(mar_bottom, mar_left, 4, 10))
+    
+    forest(
+      meta_res,
+      sortvar = data_filtered$sampling_year,
+      smlab = "Pooled Prevalence",
+      leftcols = c("studlab", "diag_test_details", "sampling_year", "n"),
+      leftlabs = c("Study", "Diagnostic Test", "Sampling Year", "Sample Size"),
+      rightcols = c("effect", "ci", "w.random"),
+      rightlabs = c("Prevalence", "95% CI", "Weight"),
+      comb.fixed = FALSE,
+      comb.random = TRUE,
+      overall = FALSE,
+      text.random = "Pooled Prevalence",
+      prediction = TRUE,
+      col.predict = "darkblue",
+      col.diamond = "red",
+      col.diamond.lines = "black",
+      shade = shade_groups,
+      print.byvar = TRUE,
+      print.tau2 = TRUE,
+      print.I2 = TRUE,
+      xlab = "Prevalence",
+      xlim = c(0, 1),
+      main = paste("Forest Plot -", plot_title, "(PR) | Ref:", ref_province),
+      just = "center",
+      cex = cex_value,
+      spacing = 1.15
+    )
+    
+    dev.off()
+    message(paste0("✅ Forest plot created for ", dataset_name, " (", n_studies, " studies)"))
+    
+  }, error = function(e) {
+    message(paste0("⚠ Meta-analysis failed for ", dataset_name, ": ", e$message))
+  })
+}
+
+# ✅ Export comprehensive summary statistics
+if(nrow(all_summary_province) > 0) {
+  # Sort by dataset and whether criteria met
+  all_summary_province <- all_summary_province %>%
+    arrange(meets_overall_criteria %>% desc(), dataset, province)
+  
+  write.csv(all_summary_province,
+            "output/statistics/province_subgroup_criteria_complete.csv",
+            row.names = FALSE)
+  message("✅ Complete statistics exported to output/statistics/province_subgroup_criteria_complete.csv")
+  
+  # Also create a summary by dataset
+  dataset_summary_province <- all_summary_province %>%
+    group_by(dataset) %>%
+    summarise(
+      n_provinces = n(),
+      n_meeting_individual = sum(meets_individual_criteria == "Yes", na.rm = TRUE),
+      meets_overall = first(meets_overall_criteria),
+      reason = first(reason_excluded),
+      .groups = "drop"
+    ) %>%
+    arrange(meets_overall %>% desc(), dataset)
+  
+  write.csv(dataset_summary_province,
+            "output/statistics/province_subgroup_summary_by_virus.csv",
+            row.names = FALSE)
+  message("✅ Summary by virus exported to output/statistics/province_subgroup_summary_by_virus.csv")
+} else {
+  message("⚠ No statistics to export")
+}
+
+# ✅ Export Q-test statistics
+if(nrow(q_test_province) > 0) {
+  q_test_province <- q_test_province %>%
+    arrange(p_value)
+  
+  write.csv(q_test_province,
+            "output/statistics/province_q_test_results.csv",
+            row.names = FALSE)
+  message("✅ Q-test results exported to output/statistics/province_q_test_results.csv")
+} else {
+  message("⚠ No Q-test results to export")
+}
+
+#######--------------------------- season --------------------------------######
+library(meta)
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+# Create output directory for statistics
+dir.create("output/statistics", recursive = TRUE, showWarnings = FALSE)
+
+# Initialize data frame to collect ALL statistics (including those not meeting criteria)
+all_summary_season <- data.frame(
+  dataset = character(),
+  season = character(),
+  n_studies = integer(),
+  I2 = numeric(),
+  required_studies = integer(),
+  meets_individual_criteria = character(),
+  n_categories_meeting_criteria = integer(),
+  meets_overall_criteria = character(),
+  reason_excluded = character(),
+  stringsAsFactors = FALSE
+)
+
+# Initialize data frame for Q-test results
+q_test_season <- data.frame(
+  dataset = character(),
+  subgroup_variable = character(),
+  reference_category = character(),
+  n_subgroups = integer(),
+  Q_between = numeric(),
+  df = numeric(),
+  p_value = numeric(),
+  interpretation = character(),
+  stringsAsFactors = FALSE
+)
+
+dataset_names <- ls(pattern = "^df_")
+
+for (dataset_name in dataset_names) {
+  data <- get(dataset_name)
+  
+  # Check required columns
+  if(!all(c("season", "positive_sample", "sample_size", "pub_ID", "sampling_year", "diag_test_details") %in% colnames(data))) {
+    message(paste0("⚠ Skipping ", dataset_name, " — missing required columns"))
+    # Record reason for exclusion
+    all_summary_season <- rbind(all_summary_season, data.frame(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      season = "N/A",
+      n_studies = 0,
+      I2 = NA,
+      required_studies = NA,
+      meets_individual_criteria = "No",
+      n_categories_meeting_criteria = 0,
+      meets_overall_criteria = "No",
+      reason_excluded = "Missing required columns",
+      stringsAsFactors = FALSE
+    ))
+    next
+  }
+  
+  # Filter data: remove NA/blank season and require sample_size >= 30
+  data_filtered <- data %>%
+    filter(!is.na(season),
+           str_trim(season) != "",
+           sample_size >= 30)
+  
+  if (nrow(data_filtered) == 0) {
+    message(paste0("⚠ Skipping ", dataset_name, " — no valid season"))
+    all_summary_season <- rbind(all_summary_season, data.frame(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      season = "N/A",
+      n_studies = 0,
+      I2 = NA,
+      required_studies = NA,
+      meets_individual_criteria = "No",
+      n_categories_meeting_criteria = 0,
+      meets_overall_criteria = "No",
+      reason_excluded = "No valid season data",
+      stringsAsFactors = FALSE
+    ))
+    next
+  }
+  
+  # Calculate prevalence
+  data_filtered <- data_filtered %>% mutate(prevalence = positive_sample / sample_size)
+  
+  # ✅ Calculate I² for ALL seasons (before filtering)
+  season_stats <- data.frame(
+    season = character(),
+    n_studies = integer(),
+    I2 = numeric(),
+    stringsAsFactors = FALSE
+  )
+  
+  for(seas in unique(data_filtered$season)) {
+    seas_data <- data_filtered %>% filter(season == seas)
+    n_pubs <- n_distinct(seas_data$pub_ID)
+    
+    # ✅ Require at least 3 independent studies (pub_IDs) per category
+    if(n_pubs >= 3) {
+      tryCatch({
+        temp_meta <- metaprop(
+          event = positive_sample,
+          n = sample_size,
+          studlab = paste(pub_ID),
+          data = seas_data,
+          sm = "PLOGIT",
+          method = "Inverse",
+          method.tau = "REML",
+          comb.fixed = FALSE,
+          comb.random = TRUE
+        )
+        season_stats <- rbind(season_stats, data.frame(
+          season = seas,
+          n_studies = n_pubs,  # ✅ Count pub_IDs, not rows
+          I2 = temp_meta$I2,
+          stringsAsFactors = FALSE
+        ))
+      }, error = function(e) {
+        season_stats <- rbind(season_stats, data.frame(
+          season = seas,
+          n_studies = n_pubs,
+          I2 = NA,
+          stringsAsFactors = FALSE
+        ))
+        message(paste0("⚠ Could not calculate I² for ", seas, " in ", dataset_name))
+      })
+    } else {
+      # ✅ Record seasons with insufficient pub_IDs
+      season_stats <- rbind(season_stats, data.frame(
+        season = seas,
+        n_studies = n_pubs,
+        I2 = NA,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  # ✅ Apply criteria based on I²
+  season_stats <- season_stats %>%
+    mutate(
+      required_studies = ifelse(is.na(I2), 5, ifelse(I2 < 50, 3, 5)),
+      meets_individual_criteria = n_studies >= required_studies
+    )
+  
+  # Count how many categories meet criteria
+  n_categories_meeting <- sum(season_stats$meets_individual_criteria, na.rm = TRUE)
+  
+  # Determine overall eligibility
+  overall_meets <- n_categories_meeting >= 2
+  
+  # Determine reason for exclusion if not meeting criteria
+  if(!overall_meets) {
+    if(n_categories_meeting == 0) {
+      reason <- "No season categories meet study number criteria"
+    } else if(n_categories_meeting == 1) {
+      reason <- "Only 1 season category meets criteria (need ≥2)"
+    } else {
+      reason <- "Other criteria not met"
+    }
+  } else {
+    # Check for zero-event subgroups in eligible categories
+    valid_seasons <- season_stats %>%
+      filter(meets_individual_criteria) %>%
+      pull(season)
+    
+    data_check <- data_filtered %>% filter(season %in% valid_seasons)
+    
+    zero_event <- data_check %>%
+      group_by(season) %>%
+      summarise(total_events = sum(positive_sample)) %>%
+      filter(total_events == 0)
+    
+    if(nrow(zero_event) > 0) {
+      reason <- paste0("Zero events in categories: ", paste(zero_event$season, collapse = ", "))
+      overall_meets <- FALSE
+    } else {
+      reason <- "Meets all criteria"
+    }
+  }
+  
+  # ✅ Store ALL statistics for this dataset
+  temp_summary <- season_stats %>%
+    mutate(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      n_categories_meeting_criteria = n_categories_meeting,
+      meets_overall_criteria = ifelse(overall_meets, "Yes", "No"),
+      reason_excluded = reason,
+      meets_individual_criteria = ifelse(meets_individual_criteria, "Yes", "No")
+    ) %>%
+    select(dataset, season, n_studies, I2, required_studies,
+           meets_individual_criteria, n_categories_meeting_criteria,
+           meets_overall_criteria, reason_excluded)
+  
+  all_summary_season <- rbind(all_summary_season, temp_summary)
+  
+  # ✅ Continue with analysis ONLY if criteria met
+  if(!overall_meets) {
+    message(paste0("⚠ Skipping ", dataset_name, " — ", reason))
+    next
+  }
+  
+  # Filter to eligible seasons
+  valid_seasons <- season_stats %>%
+    filter(meets_individual_criteria) %>%
+    pull(season)
+  
+  data_filtered <- data_filtered %>% filter(season %in% valid_seasons)
+  
+  # Keep seasons with total sample size > 1
+  size_counts <- data_filtered %>%
+    group_by(season) %>%
+    summarise(total_sample = sum(sample_size), .groups = "drop")
+  
+  valid_seasons <- size_counts %>%
+    filter(total_sample > 1) %>%
+    pull(season)
+  
+  data_filtered <- data_filtered %>% filter(season %in% valid_seasons)
+  
+  # ✅ Set reference category: season with largest sample size
+  season_sizes <- data_filtered %>%
+    group_by(season) %>%
+    summarise(total_n = sum(sample_size), .groups = "drop") %>%
+    arrange(desc(total_n))
+  
+  ref_season <- season_sizes$season[1]
+  
+  # Relevel season to set reference
+  data_filtered <- data_filtered %>%
+    mutate(season = factor(season, levels = c(ref_season, setdiff(unique(season), ref_season))))
+  
+  message(paste0("ℹ Reference category for ", dataset_name, ": ", ref_season,
+                 " (n=", season_sizes$total_n[1], ", largest sample size)"))
+  message(paste0("ℹ Included seasons: ", paste(unique(data_filtered$season), collapse = ", ")))
+  
+  # Create export folder
+  export_path <- "figures/subgroup/or_season/prevalence/"
+  dir.create(export_path, recursive = TRUE, showWarnings = FALSE)
+  
+  tryCatch({
+    # ✅ Run subgroup meta-analysis
+    meta_res <- metaprop(
+      event = positive_sample,
+      n = sample_size,
+      studlab = paste(pub_ID),
+      data = data_filtered,
+      sm = "PLOGIT",
+      method = "Inverse",
+      method.tau = "REML",
+      comb.fixed = FALSE,
+      comb.random = TRUE,
+      byvar = season,
+      print.byvar = TRUE,
+      overall = FALSE
+    )
+    
+    # ✅ Extract Q-test statistics for subgroup differences
+    q_between <- meta_res$Q.b.random
+    q_df <- meta_res$df.Q.b
+    q_pval <- meta_res$pval.Q.b.random
+    n_subgroups <- length(unique(data_filtered$season))
+    
+    # Determine significance
+    interpretation <- ifelse(is.na(q_pval), "Could not calculate", 
+                             ifelse(q_pval < 0.001, "Highly significant difference (p<0.001)",
+                                    ifelse(q_pval < 0.01, "Very significant difference (p<0.01)",
+                                           ifelse(q_pval < 0.05, "Significant difference (p<0.05)",
+                                                  "No significant difference (p≥0.05)"))))
+    
+    # Store Q-test results
+    q_test_season <- rbind(q_test_season, data.frame(
+      dataset = str_replace(dataset_name, "^df_", ""),
+      subgroup_variable = "season",
+      reference_category = ref_season,
+      n_subgroups = n_subgroups,
+      Q_between = round(q_between, 3),
+      df = q_df,
+      p_value = round(q_pval, 4),
+      interpretation = interpretation,
+      stringsAsFactors = FALSE
+    ))
+    
+    message(paste0("ℹ Q-test: Q=", round(q_between, 2), ", df=", q_df, 
+                   ", p=", round(q_pval, 4), " — ", interpretation))
+    
+    # Clean title for plotting
+    plot_title <- dataset_name %>%
+      str_replace("^df_", "") %>%
+      str_replace_all("_", " ")
+    
+    # Zebra-style shading per pub_ID
+    shade_groups <- as.numeric(factor(data_filtered$pub_ID)) %% 2 != 0
+    
+    # Dynamic sizing
+    n_studies <- nrow(data_filtered)
+    cex_value <- min(0.9, 800 / n_studies + 20)
+    mar_bottom <- max(2, 2 + n_studies * 0.5)
+    mar_left <- max(1, 1 + n_studies * 0.05)
+    png_width <- 4000
+    png_height <- max(2400, n_studies * 90)
+    
+    # Export forest plot
+    png_file <- paste0(export_path, "or_", dataset_name, ".png")
+    png(filename = png_file, width = png_width, height = png_height, res = 300)
+    par(mar = c(mar_bottom, mar_left, 4, 10))
+    
+    forest(
+      meta_res,
+      sortvar = data_filtered$sampling_year,
+      smlab = "Pooled Prevalence",
+      leftcols = c("studlab", "diag_test_details", "sampling_year", "n"),
+      leftlabs = c("Study", "Diagnostic Test", "Sampling Year", "Sample Size"),
+      rightcols = c("effect", "ci", "w.random"),
+      rightlabs = c("Prevalence", "95% CI", "Weight"),
+      comb.fixed = FALSE,
+      comb.random = TRUE,
+      overall = FALSE,
+      text.random = "Pooled Prevalence",
+      prediction = TRUE,
+      col.predict = "darkblue",
+      col.diamond = "red",      
+      col.diamond.lines = "black",
+      shade = shade_groups,
+      print.byvar = TRUE,
+      print.tau2 = TRUE,
+      print.I2 = TRUE,
+      xlab = "Prevalence",
+      xlim = c(0, 1),
+      main = paste("Forest Plot -", plot_title, "(PR) | Ref:", ref_season),
+      just = "center",
+      cex = cex_value,
+      spacing = 1.15
+    )
+    
+    dev.off()
+    message(paste0("✅ Forest plot created for ", dataset_name, " (", n_studies, " studies)"))
+    
+  }, error = function(e) {
+    message(paste0("⚠ Meta-analysis failed for ", dataset_name, ": ", e$message))
+  })
+}
+
+# ✅ Export comprehensive summary statistics
+if(nrow(all_summary_season) > 0) {
+  # Sort by dataset and whether criteria met
+  all_summary_season <- all_summary_season %>%
+    arrange(meets_overall_criteria %>% desc(), dataset, season)
+  
+  write.csv(all_summary_season,
+            "output/statistics/season_subgroup_criteria_complete.csv",
+            row.names = FALSE)
+  message("✅ Complete statistics exported to output/statistics/season_subgroup_criteria_complete.csv")
+  
+  # Also create a summary by dataset
+  dataset_summary_season <- all_summary_season %>%
+    group_by(dataset) %>%
+    summarise(
+      n_seasons = n(),
+      n_meeting_individual = sum(meets_individual_criteria == "Yes", na.rm = TRUE),
+      meets_overall = first(meets_overall_criteria),
+      reason = first(reason_excluded),
+      .groups = "drop"
+    ) %>%
+    arrange(meets_overall %>% desc(), dataset)
+  
+  write.csv(dataset_summary_season,
+            "output/statistics/season_subgroup_summary_by_virus.csv",
+            row.names = FALSE)
+  message("✅ Summary by virus exported to output/statistics/season_subgroup_summary_by_virus.csv")
+} else {
+  message("⚠ No statistics to export")
+}
+
+# ✅ Export Q-test statistics
+if(nrow(q_test_season) > 0) {
+  q_test_season <- q_test_season %>%
+    arrange(p_value)
+  
+  write.csv(q_test_season,
+            "output/statistics/season_q_test_results.csv",
+            row.names = FALSE)
+  message("✅ Q-test results exported to output/statistics/season_q_test_results.csv")
+} else {
+  message("⚠ No Q-test results to export")
+}
