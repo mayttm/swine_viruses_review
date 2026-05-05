@@ -1,0 +1,282 @@
+## ========================================================================== ##
+###-------------------------- TEMPORAL MAPPING ------------------------------###
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(viridis)
+library(patchwork)
+library(ragg)
+
+## ------------------- DATA PREPARATION FUNCTIONS --------------------------- ##
+
+# Function to prepare sample size profiles by province and period
+prepare_prov_year_profile <- function(data) {
+  data <- data %>%
+    filter(independent_sample == "yes")
+  
+  if (nrow(data) == 0) {
+    warning("No independent samples found")
+    return(NULL)
+  }
+  
+  data %>%
+    transmute(
+      sampling_year = as.integer(sampling_year),
+      province = trimws(province),
+      sample_size = suppressWarnings(as.numeric(sample_size))
+    ) %>%
+    filter(!is.na(sampling_year), !is.na(province), !is.na(sample_size),
+           sampling_year >= 2000, sampling_year <= 2024) %>%
+    mutate(period = case_when(
+      sampling_year >= 2000 & sampling_year < 2009 ~ "2000-2009",
+      sampling_year >= 2009 & sampling_year < 2015 ~ "2009-2015",
+      sampling_year >= 2015 & sampling_year < 2020 ~ "2015-2020",
+      sampling_year >= 2020 & sampling_year <= 2024 ~ "2020-2024"
+    )) %>%
+    filter(!is.na(period)) %>%
+    group_by(province, period) %>%
+    summarise(total_samples = sum(sample_size, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = period, values_from = total_samples, values_fill = 0) %>%
+    arrange(province)
+}
+
+# Function to prepare virus diversity profiles by province and period
+prepare_year_virus_profile <- function(data) {
+  data <- data %>%
+    filter(independent_sample == "yes")
+  
+  if (nrow(data) == 0) {
+    warning("No independent samples found")
+    return(NULL)
+  }
+  
+  data %>%
+    transmute(
+      sampling_year = as.integer(sampling_year),
+      province = trimws(province),
+      virus = trimws(virus)
+    ) %>%
+    filter(!is.na(sampling_year), !is.na(province),
+           sampling_year >= 2000, sampling_year <= 2024) %>%
+    mutate(period = case_when(
+      sampling_year >= 2000 & sampling_year < 2009 ~ "2000-2009",
+      sampling_year >= 2009 & sampling_year < 2015 ~ "2009-2015",
+      sampling_year >= 2015 & sampling_year < 2020 ~ "2015-2020",
+      sampling_year >= 2020 & sampling_year <= 2024 ~ "2020-2024"
+    )) %>%
+    filter(!is.na(period)) %>%
+    group_by(province, period) %>%
+    summarise(total_virus = n_distinct(virus, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = period, values_from = total_virus, values_fill = 0) %>%
+    arrange(province)
+}
+
+# Helper function to calculate max value across all periods
+calc_max_value <- function(profile_data) {
+  profile_data %>%
+    select(-province) %>%
+    summarise(across(everything(), max, na.rm = TRUE)) %>%
+    unlist() %>%
+    max()
+}
+
+## ------------------- COMBINED PANEL FUNCTION ------------------------------ ##
+
+create_combined_temporal_panel <- function(prov_year_profile_samples,
+                                           prov_year_profile_virus,
+                                           china,
+                                           periods,
+                                           max_sample_size,
+                                           max_virus_count,
+                                           data_type) {
+  
+  map_list <- list()
+  max_log_sample_size <- log1p(max_sample_size)
+  
+  for (i in seq_along(periods)) {
+    period <- periods[i]
+    is_last_row <- (i == length(periods))
+    
+    # --- LEFT PLOT: Total samples (log scale) ---
+    period_data_samples <- prov_year_profile_samples %>%
+      select(province, all_of(period)) %>%
+      rename(total_samples = !!sym(period))
+    
+    china_samples <- china %>%
+      left_join(period_data_samples, by = c("province_shp" = "province")) %>%
+      mutate(
+        temp_value = replace_na(total_samples, 0),
+        temp_value = ifelse(province_shp %in% c("Taiwan", "Hong Kong", "Macau"), NA, temp_value),
+        total_samples = log1p(temp_value)
+      )
+    
+    map_samples <- ggplot(data = china_samples) +
+      geom_sf(aes(fill = total_samples)) +
+      scale_fill_viridis_c(
+        limits = c(1, max_log_sample_size),
+        name = "Total samples\n(log scale)",
+        option = "plasma",
+        na.value = "grey85",
+        direction = -1,
+        guide = if(is_last_row) guide_colorbar(barwidth = 10, barheight = 0.8) else "none"
+      ) +
+      theme_minimal(base_size = 12, base_family = "sans") +
+      labs(title = paste("Pig samples:", period)) +
+      theme(
+        plot.title = element_text(size = 11, face = "bold"),
+        legend.position = "bottom"
+      )
+    
+    # --- RIGHT PLOT: Distinct viruses ---
+    period_data_virus <- prov_year_profile_virus %>%
+      select(province, all_of(period)) %>%
+      rename(total_virus = !!sym(period))
+    
+    china_virus <- china %>%
+      left_join(period_data_virus, by = c("province_shp" = "province")) %>%
+      mutate(
+        temp_value = replace_na(total_virus, 0),
+        temp_value = ifelse(province_shp %in% c("Taiwan", "Hong Kong", "Macau"), NA, temp_value),
+        total_virus = temp_value
+      )
+    
+    map_virus <- ggplot(data = china_virus) +
+      geom_sf(aes(fill = total_virus)) +
+      scale_fill_viridis_c(
+        limits = c(1, max_virus_count),
+        name = "Distinct\nviruses",
+        option = "plasma",
+        na.value = "grey85",
+        direction = -1,
+        guide = if(is_last_row) guide_colorbar(barwidth = 10, barheight = 0.8) else "none"
+      ) +
+      theme_minimal(base_size = 12, base_family = "sans") +
+      labs(title = paste("Distinct viruses:", period)) +
+      theme(
+        plot.title = element_text(size = 11, face = "bold"),
+        legend.position = "bottom"
+      )
+    
+    map_list[[paste0(period, "_samples")]] <- map_samples
+    map_list[[paste0(period, "_virus")]] <- map_virus
+  }
+  
+  # Combine into 4×2 panel
+  combined_panel <- wrap_plots(
+    map_list[["2000-2009_samples"]], map_list[["2000-2009_virus"]],
+    map_list[["2009-2015_samples"]], map_list[["2009-2015_virus"]],
+    map_list[["2015-2020_samples"]], map_list[["2015-2020_virus"]],
+    map_list[["2020-2024_samples"]], map_list[["2020-2024_virus"]],
+    ncol = 2
+  ) +
+    plot_annotation(
+      title = "",
+      #paste(data_type, "detection: Temporal trends in sampling and virus diversity
+      tag_levels = "A",
+    # theme = theme(
+    #   plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    #   text = element_text(family = "sans")
+    # )
+    )
+  
+  return(combined_panel)
+}
+
+## ------------------- EXECUTE ANALYSIS ------------------------------------- ##
+
+# Load shapefile and define periods
+china <- load_shapefile()
+periods <- c("2000-2009", "2009-2015", "2015-2020", "2020-2024")
+
+# Prepare molecular data
+prov_year_profile_molec <- prepare_prov_year_profile(data_surv_single_molec)
+prov_year_virus_molec <- prepare_year_virus_profile(data_surv_single_molec)
+max_sample_size_molec <- calc_max_value(prov_year_profile_molec)
+max_virus_count_molec <- calc_max_value(prov_year_virus_molec)
+
+# Prepare serological data
+prov_year_profile_sero <- prepare_prov_year_profile(data_surv_single_sero)
+prov_year_virus_sero <- prepare_year_virus_profile(data_surv_single_sero)
+max_sample_size_sero <- calc_max_value(prov_year_profile_sero)
+max_virus_count_sero <- calc_max_value(prov_year_virus_sero)
+
+# Create combined panels
+combined_panel_molec <- create_combined_temporal_panel(
+  prov_year_profile_samples = prov_year_profile_molec,
+  prov_year_profile_virus = prov_year_virus_molec,
+  china = china,
+  periods = periods,
+  max_sample_size = max_sample_size_molec,
+  max_virus_count = max_virus_count_molec,
+  data_type = "Molecular"
+)
+
+combined_panel_sero <- create_combined_temporal_panel(
+  prov_year_profile_samples = prov_year_profile_sero,
+  prov_year_profile_virus = prov_year_virus_sero,
+  china = china,
+  periods = periods,
+  max_sample_size = max_sample_size_sero,
+  max_virus_count = max_virus_count_sero,
+  data_type = "Serological"
+)
+
+# Preview
+print(combined_panel_molec)
+print(combined_panel_sero)
+
+# Export settings
+export_width <- 7.5
+export_height <- 12
+export_dpi <- 300
+
+# --- Molecular figure ---
+# TIFF
+ggsave(
+  "figures/Figure_5_combined_temporal_molec.tiff",
+  combined_panel_molec,
+  width = export_width, height = export_height, units = "in",
+  dpi = export_dpi, device = ragg::agg_tiff, compression = "lzw", bg = "white"
+)
+
+# PDF
+ggsave(
+  "figures/Figure_5_combined_temporal_molec.pdf",
+  combined_panel_molec,
+  width = export_width, height = export_height, units = "in",
+  device = "pdf", bg = "white"
+)
+
+# JPG
+ggsave(
+  "figures/Figure_5_combined_temporal_molec.jpg",
+  combined_panel_molec,
+  width = export_width, height = export_height, units = "in",
+  dpi = export_dpi, device = "jpeg", bg = "white", quality = 95
+)
+
+# --- Serological figure ---
+# TIFF
+ggsave(
+  "figures/Figure_6_combined_temporal_sero.tiff",
+  combined_panel_sero,
+  width = export_width, height = export_height, units = "in",
+  dpi = export_dpi, device = ragg::agg_tiff, compression = "lzw", bg = "white"
+)
+
+# PDF
+ggsave(
+  "figures/Figure_6_combined_temporal_sero.pdf",
+  combined_panel_sero,
+  width = export_width, height = export_height, units = "in",
+  device = "pdf", bg = "white"
+)
+
+# JPG
+ggsave(
+  "figures/Figure_6_combined_temporal_sero.jpg",
+  combined_panel_sero,
+  width = export_width, height = export_height, units = "in",
+  dpi = export_dpi, device = "jpeg", bg = "white", quality = 95
+)
