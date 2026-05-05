@@ -1,0 +1,407 @@
+## ========================================================================== ##
+### ------------------------- VIRUS LEVEL SUMMARY ---------------------------###
+
+data_surv_single <- read.csv("data/data_surv_single_20251028.csv", stringsAsFactors = FALSE)
+
+library(dplyr)
+
+# Summarize data at virus level
+virus_summary <- data_surv_single %>%
+  group_by(virus) %>%
+  summarise(
+    number_of_studies = n_distinct(pub_ID),
+    total_positive = sum(positive_sample, na.rm = TRUE),
+    total_sample_size = sum(sample_size, na.rm = TRUE),
+    avg_sample_per_study = total_sample_size / number_of_studies,
+    avg_sample_per_province = total_sample_size / n_distinct(province),
+    earliest_sampling_year = min(sampling_year, na.rm = TRUE),
+    latest_sampling_year = max(sampling_year, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_sample_size))
+
+
+# View the summary
+print(virus_summary)
+
+## -------------------------- PREPARING DATASETS ---------------------------- ##
+
+# 1. Clean data
+data_surv_single <- data_surv_single %>%
+  mutate(
+    virus = trimws(virus),
+    province = trimws(province)
+  )
+
+# 2. Calculate virus prevalence 
+virus_freq <- data_surv_single %>%
+  count(virus, name = "n") %>%
+  mutate(freq = n / nrow(data_surv_single))
+
+# 3. Identify viruses below threshold 
+low_freq_viruses <- virus_freq %>%
+  filter(freq < 0.01) %>%
+  pull(virus)
+
+# 4. Group viruses
+data_surv_single <- data_surv_single %>%
+  mutate(
+    virus_group = case_when(
+      virus %in% c("PCV2", "PCV3", "PCV4") ~ "PCV",
+      virus %in% c("TTV", "TTSuV") ~ "TTV",
+      virus %in% low_freq_viruses ~ "Others",
+      TRUE ~ virus
+    )
+  )
+
+unique(data_surv_single$virus_group)
+
+# Summarize data by pathogen → year → province
+surv_df <- data_surv_single %>%
+  group_by(diag_type, virus, pub_ID, pig_type) %>%
+  summarise(
+    total_positive_sample = sum(positive_sample, na.rm = TRUE),
+    total_sample_size = sum(sample_size, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## ----------------- creating datasets for meta-analysis -------------------- ##
+
+library(dplyr)
+
+columns_to_keep <- c("pub_ID", "region", "province", "pig_type", "health_status", 
+                     "sample_type", "sampling_year", "positive_sample", "season",
+                     "subtype_strain", "strain_detail", "sample_size", "diag_test", 
+                     "diag_test_details", "co.infection", "farm_size", "vaccination", 
+                     "independent_sample", "remarks")
+
+# Get unique combinations of diag_type and virus
+unique_combos <- data_surv_single %>%
+  distinct(diag_type, virus)
+
+# Loop through each combination and create datasets in the workspace
+for (i in seq_len(nrow(unique_combos))) {
+  
+  diag_val <- unique_combos$diag_type[i]
+  virus_val <- unique_combos$virus[i]
+  
+  # Special handling for IAV: create separate datasets for each subtype_strain
+  if (virus_val == "IAV") {
+    
+    # Get unique subtype strains for IAV
+    subtype_list <- data_surv_single %>%
+      filter(diag_type == diag_val, virus == virus_val) %>%
+      pull(subtype_strain) %>%
+      unique() %>%
+      na.omit()
+    
+    # Loop through each subtype and create separate datasets
+    for (subtype in subtype_list) {
+      
+      subset_data <- data_surv_single %>%
+        filter(diag_type == diag_val, virus == virus_val, subtype_strain == subtype) %>%
+        select(all_of(columns_to_keep))
+      
+      # Create clean object name: df_diag_virus_subtype
+      object_name <- paste0("df_", 
+                            gsub("[^A-Za-z0-9]+", "_", diag_val), "_",
+                            gsub("[^A-Za-z0-9]+", "_", virus_val), "_",
+                            gsub("[^A-Za-z0-9]+", "_", subtype))
+      
+      # Assign to workspace
+      assign(object_name, subset_data, envir = .GlobalEnv)
+    }
+    
+  } else {
+    # For all other viruses, create one dataset per diag_type + virus
+    subset_data <- data_surv_single %>%
+      filter(diag_type == diag_val, virus == virus_val) %>%
+      select(all_of(columns_to_keep))
+    
+    object_name <- paste0("df_", 
+                          gsub("[^A-Za-z0-9]+", "_", diag_val), "_",
+                          gsub("[^A-Za-z0-9]+", "_", virus_val))
+    
+    assign(object_name, subset_data, envir = .GlobalEnv)
+  }
+}
+
+## --------------------- preparing data for mapping ------------------------- ##
+
+library(dplyr)
+library(tidyr)
+library(readr)      
+library(stringi)   
+
+# step 0. Ensure UTF-8 Compatibility
+try(Sys.setlocale("LC_ALL", "en_US.UTF-8"), silent = TRUE)
+try(Sys.setlocale("LC_CTYPE", "en_US.UTF-8"), silent = TRUE)
+
+data_surv_single <- data_surv_single %>%
+  mutate(across(where(is.character), ~ enc2utf8(.)))
+
+bad_rows <- data_surv_single %>%
+  filter(!stri_enc_isutf8(province) | !stri_enc_isutf8(virus_group))
+
+if (nrow(bad_rows) > 0) {
+  message("⚠️ Found non-UTF8 characters in the dataset. Automatically fixing...")
+  data_surv_single <- data_surv_single %>%
+    mutate(across(where(is.character), ~ stri_encode(., "", "UTF-8")))
+}
+
+# step 1. Split the dataframe into two based on diag_type
+data_surv_single_molec <- data_surv_single %>% 
+  filter(diag_type == "molecular")
+
+data_surv_single_sero <- data_surv_single %>%
+  filter(diag_type == "serological")
+
+# step 2. create a function for province-Level Summary
+library(dplyr)
+library(tidyr)
+
+
+process_province_data <- function(data) {
+  # Filter only independent samples
+  data <- data %>%
+    filter(independent_sample == "yes")
+  
+  if (nrow(data) == 0) {
+    warning(paste("No independent samples found for", title))
+    return(NULL)
+  }
+  # Step 2: Province-Level Summary
+  province_profile <- data %>%
+    group_by(province) %>%
+    summarise(
+      frequency_pub_ID = n_distinct(pub_ID),   # Unique publications
+      frequency_virus_studied = n_distinct(virus), # Unique virus groups studied
+      frequency_virus_detected = n_distinct(virus[positive_sample > 0]),
+      sample_number = sum(sample_size, na.rm = TRUE),
+      total_positive = sum(positive_sample, na.rm = TRUE),
+      average_prevalence = ifelse(sample_number > 0, total_positive / sample_number, NA),
+      min_sampling_year = min(sampling_year, na.rm = TRUE),  # Earliest year
+      max_sampling_year = max(sampling_year, na.rm = TRUE),  # Newest year
+      .groups = "drop"
+    )
+  
+  # Step 3: Positive sample per Virus Group per Province
+  virus_group_profile <- data %>%
+    mutate(
+      virus_group_mod = case_when(
+        virus_group == "IAV" & grepl("H1N1", subtype_strain, ignore.case = TRUE) ~ "IAV_H1N1",
+        virus_group == "PCV" & grepl("PCV2", virus, ignore.case = TRUE) ~ "PCV2",
+        virus_group == "PCV" & grepl("PCV3", virus, ignore.case = TRUE) ~ "PCV3",
+        TRUE ~ virus_group
+      )
+    ) %>%
+    group_by(province, virus_group_mod) %>%
+    summarise(positive_sample_group = sum(positive_sample, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(
+      names_from = virus_group_mod,
+      values_from = positive_sample_group,
+      values_fill = list(positive_sample_group = 0)
+    ) %>%
+    select(-any_of(c("IAV", "PCV")))
+  
+  # Step 4: Weighted Average Prevalence per Virus Group per Province
+  virus_group_prevalence <- data %>%
+    mutate(
+      virus_group_mod = case_when(
+        virus_group == "IAV" & grepl("H1N1", subtype_strain, ignore.case = TRUE) ~ "IAV_H1N1",
+        virus_group == "PCV" & grepl("PCV2", virus, ignore.case = TRUE) ~ "PCV2",
+        virus_group == "PCV" & grepl("PCV3", virus, ignore.case = TRUE) ~ "PCV3",
+        TRUE ~ virus_group
+      )
+    ) %>%
+    group_by(province, virus_group_mod) %>%
+    summarise(
+      avg_prevalence = sum(positive_sample, na.rm = TRUE) / sum(sample_size, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    pivot_wider(
+      names_from = virus_group_mod,
+      values_from = avg_prevalence,
+      names_prefix = "avg_prev_",
+      values_fill = list(avg_prevalence = 0)
+    )
+  
+  # Step 5: Merge All Profiles
+  province_virus_profile <- province_profile %>%
+    left_join(virus_group_profile, by = "province") %>%
+    left_join(virus_group_prevalence, by = "province")
+  
+  return(province_virus_profile)
+}
+
+# step 3. apply this function to each dataset
+province_profile_molec <- process_province_data(data_surv_single_molec)
+province_profile_sero <- process_province_data(data_surv_single_sero)
+
+##----------------------------- SPATIAL MAPPING ------------------------------##
+
+library(tidyverse)
+library(patchwork)
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(readr)
+
+## --------- Shapefile --------
+canon <- function(x) {
+  x <- as.character(x)
+  x <- iconv(x, to = "ASCII//TRANSLIT")
+}
+
+normalize_adm1 <- function(x) {
+  x <- trimws(as.character(x))
+  x <- gsub("\\s*\\(.*\\)$", "", x)
+  x <- gsub("\\s+(Province|Municipality|Special Administrative Region|Autonomous Region)$", "", x, ignore.case = TRUE)
+  x <- gsub("^Xizang$", "Tibet", x, ignore.case = TRUE)
+  x <- gsub("^Macao.*$", "Macau", x, ignore.case = TRUE)
+  x <- gsub("^Hong\\s*Kong.*$", "Hong Kong", x, ignore.case = TRUE)
+  x
+}
+
+collapse_levels <- function(x, n_min = 50) {
+  x <- forcats::fct_explicit_na(factor(x), na_level = "unknown")
+  tab <- table(x); rare <- names(tab)[tab < n_min]
+  forcats::fct_collapse(x, Other = rare)
+}
+
+# Define the load shapefile snippet as a function
+load_shapefile <- function() {
+  shp_path <- "arcgis/shapefile/chn_admbnda_adm1_ocha_2020.shp"
+  prov_col <- "ADM1_EN"
+  china <- sf::st_read(shp_path, quiet = TRUE) %>%
+    mutate(
+      province_shp = normalize_adm1(.data[[prov_col]]),
+      province_shp = dplyr::case_when(
+        province_shp == "Guangxi Zhuang" ~ "Guangxi",
+        province_shp == "Xinjiang Uygur" ~ "Xinjiang",
+        province_shp == "Ningxia Hui" ~ "Ningxia",
+        province_shp == "Nei Mongol" ~ "Inner Mongolia",
+        province_shp == "Xizang" ~ "Tibet",
+        province_shp == "Taiwan" ~ "Taiwan",
+        province_shp == "Hong Kong" ~ "Hong Kong",
+        province_shp == "Macau" ~ "Macau",
+        TRUE ~ province_shp
+      ),
+      prov_key = canon(province_shp)
+    )
+  return(china)
+}
+
+china <- load_shapefile()
+
+##-------------------------- create plot functions -------------------------- ##
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(patchwork)
+# install.packages("ragg")
+library(ragg)
+
+# Load the shapefile
+china <- load_shapefile()
+
+# Define function to create and plot maps
+create_sample_plot <- function(data, value_col, title, legend_name, china, data_type) {
+  data_to_plot <- china %>%
+    left_join(data, by = c("province_shp" = "province")) %>%
+    mutate(temp_value = replace_na(.data[[value_col]], NA)) %>%
+    mutate(
+      temp_value = ifelse(province_shp %in% c("Taiwan", "Hong Kong", "Macau"), NA, temp_value)
+    )
+  
+  map_plot <- ggplot(data = data_to_plot) +
+    geom_sf(aes(fill = temp_value)) +
+    scale_fill_viridis_c(
+      option = "plasma",
+      direction = -1,
+      na.value = "grey85",
+      name = legend_name,
+      n.breaks = 5,
+      limits = c(1, 70000)
+    ) +
+    # Keep same base size, specify base_family for consistent TIFF text rendering
+    theme_minimal(base_size = 14, base_family = "sans") +
+    labs(
+      title = title,
+      subtitle = paste(data_type, "detection")
+    )
+  
+  return(map_plot)
+}
+
+# Define function to create and plot maps
+create_virus_no_plot <- function(data, value_col, title, legend_name, china, data_type) {
+  data_to_plot <- china %>%
+    left_join(data, by = c("province_shp" = "province")) %>%
+    mutate(temp_value = replace_na(.data[[value_col]], NA)) %>%
+    mutate(
+      temp_value = ifelse(province_shp %in% c("Taiwan", "Hong Kong", "Macau"), NA, temp_value)
+    )
+  
+  map_plot <- ggplot(data = data_to_plot) +
+    geom_sf(aes(fill = temp_value)) +
+    scale_fill_viridis_c(
+      option = "plasma",
+      direction = -1,
+      na.value = "grey85",
+      name = legend_name,
+      n.breaks = 4,
+      limits = c(1, 20)
+    ) +
+    # Keep same base size, specify base_family for consistent TIFF text rendering
+    theme_minimal(base_size = 14, base_family = "sans") +
+    labs(
+      title = title,
+      subtitle = paste(data_type, "detection")
+    )
+  
+  return(map_plot)
+}
+
+# --------- Create and plots for total samples and total distinct viruses
+total_virus_map_molec <- create_virus_no_plot(
+  province_profile_molec, "frequency_virus_detected",
+  "Number of distinct viruses detected", "Frequency", china, "Molecular")
+
+sample_number_map_molec <- create_sample_plot(
+  province_profile_molec, "sample_number",
+  "Total pig samples by province", "Total samples", china, "Molecular")
+
+total_virus_map_sero <- create_virus_no_plot(
+  province_profile_sero, "frequency_virus_detected",
+  "Number of distinct viruses detected", "Frequency", china, "Serological")
+
+sample_number_map_sero <- create_sample_plot(
+  province_profile_sero, "sample_number",
+  "Total pig samples by province", "Total samples", china, "Serological")
+
+print(total_virus_map_molec)
+print(sample_number_map_molec)
+print(total_virus_map_sero)
+print(sample_number_map_sero)
+
+# ----- Combine plots with patchwork -----
+layout <- "
+AB
+CD
+"
+
+combined_descriptive_plots <- sample_number_map_molec + sample_number_map_sero +
+  total_virus_map_molec + total_virus_map_sero +
+  plot_layout(design = layout, guides = "collect") +
+  plot_annotation(tag_levels = "A") &
+  theme(
+    legend.position = "right",
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.spacing = unit(0.5, "lines"),
+    text = element_text(family = "sans")  # ensure consistent font family in TIFF
+  )
+
+print(combined_descriptive_plots)
