@@ -1,0 +1,835 @@
+## ========================================================================== ##
+## ----------------------- META-ANALYSIS ------------------------------------ ##
+## ========================================================================== ##
+
+# packages <- c("metafor", "dplyr", "stringr")
+installed <- rownames(installed.packages())
+if (length(setdiff(packages, installed)) > 0) {
+  install.packages(setdiff(packages, installed))
+}
+library(meta)
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+# Create output directory for statistics
+dir.create("output/statistics", recursive = TRUE, showWarnings = FALSE)
+
+# Initialize data frame to collect forest plot eligibility statistics
+forest_plot_summary <- data.frame(
+  dataset = character(),
+  total_rows_raw = integer(),
+  n_rows_after_sample_filter = integer(),
+  n_rows_after_diag_filter = integer(),
+  n_unique_pub_ids = integer(),
+  meets_pub_id_criteria = character(),
+  meets_sample_size_criteria = character(),
+  meets_overall_criteria = character(),
+  reason_excluded = character(),
+  stringsAsFactors = FALSE
+)
+
+dataset_names <- ls(pattern = "^df_")
+
+for (dataset_name in dataset_names) {
+  data <- get(dataset_name)
+  # Track original size
+  total_rows_raw <- nrow(data)
+  # Filter studies with at least 30 samples
+  data_sample_filtered <- data %>%
+    filter(sample_size >= 30)
+  n_rows_after_sample <- nrow(data_sample_filtered)
+  # Check if sample_size >= 30 for ALL remaining rows
+  meets_sample_criteria <- n_rows_after_sample > 0 &&
+    all(data_sample_filtered$sample_size >= 30)
+  # Exclude studies using virus isolation
+  data_filtered <- data_sample_filtered %>%
+    filter(diag_test != "Virus_isolation")
+  n_rows_after_diag <- nrow(data_filtered)
+  n_unique_pubs <- length(unique(data_filtered$pub_ID))
+  # Check criteria
+  meets_pub_id_criteria <- n_unique_pubs >= 5
+  meets_overall <- meets_pub_id_criteria && meets_sample_criteria
+  # Determine reason for exclusion
+  if (!meets_overall) {
+    if (n_rows_after_sample == 0) {
+      reason <- "No studies with sample_size >= 30"
+    } else if (!meets_sample_criteria) {
+      reason <- "Some studies have sample_size < 30"
+    } else if (n_rows_after_diag == 0) {
+      reason <- "No studies after excluding virus isolation"
+    } else if (!meets_pub_id_criteria) {
+      reason <- paste0("Only ", n_unique_pubs, " pub_IDs (need ≥5)")
+    } else {
+      reason <- "Unknown exclusion reason"
+    }
+  } else {
+    reason <- "Meets all criteria - forest plot created"
+  }
+  # Store statistics
+  forest_plot_summary <- rbind(forest_plot_summary, data.frame(
+    dataset = str_replace(dataset_name, "^df_", ""),
+    total_rows_raw = total_rows_raw,
+    n_rows_after_sample_filter = n_rows_after_sample,
+    n_rows_after_diag_filter = n_rows_after_diag,
+    n_unique_pub_ids = n_unique_pubs,
+    meets_pub_id_criteria = ifelse(meets_pub_id_criteria, "Yes", "No"),
+    meets_sample_size_criteria = ifelse(meets_sample_criteria, "Yes", "No"),
+    meets_overall_criteria = ifelse(meets_overall, "Yes", "No"),
+    reason_excluded = reason,
+    stringsAsFactors = FALSE
+  ))
+  # Skip if criteria not met
+  if (!meets_overall) {
+    message(paste0("⏩ Skipping ", dataset_name, ": ", reason))
+    next
+  }
+  # Continue with forest plot creation
+  data <- data_filtered
+  # Sort by sampling year
+  data <- data %>%
+    arrange(sampling_year)
+  # Create study label
+  data <- data %>%
+    mutate(label = paste0(pub_ID))
+  # Meta-analysis object using {meta}
+  meta_res <- metaprop(
+    event = positive_sample,
+    n = sample_size,
+    studlab = label,
+    data = data,
+    sm = "PLOGIT",
+    method = "Inverse",
+    comb.fixed = FALSE,
+    comb.random = TRUE,
+    method.tau = "REML",
+    hakn = TRUE,
+    prediction = TRUE
+  )
+  # ===== PUBLICATION BIAS ASSESSMENT =====
+  # Perform trim-and-fill analysis
+  tf_res <- trimfill(meta_res)
+  # Extract key information
+  n_imputed <- tf_res$k0  # Number of imputed studies
+  pooled_original <- meta_res$TE.random
+  pooled_adjusted <- tf_res$TE.random
+  # Calculate adjusted prevalence and 95% CI
+  adj_prev <- exp(pooled_adjusted) / (1 + exp(pooled_adjusted))
+  adj_lower <- exp(tf_res$lower.random) / (1 + exp(tf_res$lower.random))
+  adj_upper <- exp(tf_res$upper.random) / (1 + exp(tf_res$upper.random))
+  # Create annotation text
+  if (n_imputed > 0) {
+    annotation_text <- paste0("Trim-and-fill analysis imputed ", n_imputed, " data")
+  } else {
+    annotation_text <- "Trim-and-fill: No studies imputed (no publication bias detected)"
+  }
+  # Print publication bias results
+  message(paste0("\n📊 Publication Bias Assessment for ", dataset_name, ":"))
+  message(paste0("   Number of studies: ", meta_res$k))
+  message(paste0("   Imputed studies (trim-and-fill): ", n_imputed))
+  message(paste0("   Original pooled prevalence: ", round(exp(pooled_original)/(1+exp(pooled_original)), 3)))
+  message(paste0("   Adjusted pooled prevalence: ", round(adj_prev, 3),
+                 " (95% CI: ", round(adj_lower, 3), "-", round(adj_upper, 3), ")"))
+  # Function to create funnel plot
+  create_funnel_plot <- function() {
+    funnel(tf_res,
+           xlab = "Prevalence (logit scale)",
+           studlab = TRUE,
+           cex = 0.8)
+    title(paste0("Funnel Plot with Trim-and-Fill: ",
+                 str_replace_all(str_replace(dataset_name, "^df_", ""), "_", " ")))
+  }
+  # Save funnel plot in multiple formats
+  # TIFF
+  tiff(
+    filename = paste0("figures/funnel/trim-and-filled/funnel_", dataset_name, ".tiff"),
+    width = 3000,
+    height = 2400,
+    units = "px",
+    res = 300,
+    compression = "lzw"
+  )
+  create_funnel_plot()
+  dev.off()
+  # JPEG
+  jpeg(
+    filename = paste0("figures/funnel/trim-and-filled/funnel_", dataset_name, ".jpg"),
+    width = 3000,
+    height = 2400,
+    units = "px",
+    res = 300,
+    quality = 95
+  )
+  create_funnel_plot()
+  dev.off()
+  # PDF
+  pdf(
+    file = paste0("figures/funnel/trim-and-filled/funnel_", dataset_name, ".pdf"),
+    width = 10,
+    height = 8
+  )
+  create_funnel_plot()
+  dev.off()
+  # Clean title for forest plot
+  plot_title <- dataset_name %>%
+    str_replace("^df_", "") %>%
+    str_replace_all("_", " ")
+  # Zebra-style shading by pub_ID
+  shade_groups <- as.numeric(factor(data$pub_ID)) %% 2 != 0
+  # Dynamic font & margin scaling
+  n_studies  <- nrow(data)
+  cex_value  <- min(0.9, 800 / n_studies + 20)
+  mar_bottom <- max(2, 2 + n_studies * 0.1)
+  mar_left   <- max(1, 1 + n_studies * 0.05)
+  # Figure dimensions
+  tiff_width  <- 4000
+  tiff_height <- max(2800, n_studies * 100)
+  # Function to create forest plot
+  create_forest_plot <- function() {
+    par(family = "sans")
+    par(mar = c(mar_bottom, mar_left, 6, 10))
+    forest(
+      meta_res,
+      sortvar = data$sampling_year,
+      smlab = "",
+      leftcols = c("studlab", "diag_test_details", "sampling_year", "n"),
+      leftlabs = c("Study", "Diagnostic Test", "Sampling Year", "Sample Size"),
+      rightcols = c("effect", "ci", "w.random"),
+      rightlabs = c("Prevalence", "95% CI", "Weight"),
+      comb.fixed = FALSE,
+      comb.random = TRUE,
+      text.random = "Random-effects Pooled Prevalence",
+      prediction = TRUE,
+      col.predict = "darkblue",
+      col.diamond.random = "red",
+      col.diamond.lines = "black",
+      shade = shade_groups,
+      print.tau2 = TRUE,
+      print.I2 = TRUE,
+      print.tau2.ci = FALSE,
+      test.overall.random = TRUE,
+      xlab = "Pooled Prevalence",
+      xlim = c(0, 1),
+      just = "center",
+      cex = cex_value,
+      cex.lab = cex_value,
+      colgap.forest.left = "2cm",
+      spacing = 1.15,
+      addrow.overall = TRUE,
+      text.addline1 = paste0("Adjusted Pooled Prevalence (Trim-and-Fill): ",
+                             sprintf("%.3f", adj_prev)),
+      effect.addline1 = adj_prev,
+      ci.addline1 = c(adj_lower, adj_upper),
+      col.diamond.addline1 = "darkblue",
+      text.addline2 = annotation_text,
+      just.addline2 = "left",
+      cex.addline2 = cex_value * 0.85,
+      col.addline2 = if(n_imputed > 0) "darkblue" else "darkgreen"
+    )
+  }
+  # Save forest plot in multiple formats
+  # TIFF
+  ragg::agg_tiff(
+    filename = paste0("figures/forest/forest_", dataset_name, ".tiff"),
+    width = tiff_width,
+    height = tiff_height,
+    units = "px",
+    res = 300,
+    compression = "lzw",
+    background = "white"
+  )
+  create_forest_plot()
+  dev.off()
+  # JPEG
+  jpeg(
+    filename = paste0("figures/forest/forest_", dataset_name, ".jpg"),
+    width = tiff_width,
+    height = tiff_height,
+    units = "px",
+    res = 300,
+    quality = 95
+  )
+  create_forest_plot()
+  dev.off()
+  # PDF
+  pdf(
+    file = paste0("figures/forest/forest_", dataset_name, ".pdf"),
+    width = tiff_width / 300,
+    height = tiff_height / 300
+  )
+  create_forest_plot()
+  dev.off()
+  message(paste0("✅ Forest and funnel plots created for ", dataset_name, " (", n_studies, " studies)"))
+  message(paste0("   Formats: TIFF, JPEG, PDF"))
+}
+# ✅ Export forest plot eligibility statistics
+if(nrow(forest_plot_summary) > 0) {
+  # Sort by whether criteria met
+  forest_plot_summary <- forest_plot_summary %>%
+    arrange(meets_overall_criteria %>% desc(), dataset)
+  write.csv(forest_plot_summary,
+            "output/statistics/forest_plot_eligibility.csv",
+            row.names = FALSE)
+  message("\n✅ Forest plot eligibility statistics exported to output/statistics/forest_plot_eligibility.csv")
+  # Print summary
+  n_eligible <- sum(forest_plot_summary$meets_overall_criteria == "Yes")
+  n_total <- nrow(forest_plot_summary)
+  message(paste0("\n📊 Summary: ", n_eligible, "/", n_total, " viruses met criteria for forest plot creation"))
+} else {
+  message("⚠ No statistics to export")
+}
+
+## ------------- Combined Pooled Prevalence with Trim-and-Fill -------------- ##
+library(metafor)
+library(meta)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ragg)
+
+pooled_results <- list()
+dataset_names <- ls(pattern = "^df_")
+
+for (dataset_name in dataset_names) {
+  data <- get(dataset_name)
+  
+  # Harmonize column names
+  if (!"sample_size" %in% names(data)) {
+    if ("n" %in% names(data)) data <- dplyr::rename(data, sample_size = n)
+    else if ("N" %in% names(data)) data <- dplyr::rename(data, sample_size = N)
+  }
+  
+  # Check required columns
+  required <- c("sample_size","positive_sample","diag_test","pub_ID","sampling_year")
+  missing <- setdiff(required, names(data))
+  if (length(missing)) {
+    message(paste0("⏩ Skipping ", dataset_name, ": missing columns: ", paste(missing, collapse=", ")))
+    next
+  }
+  
+  # Filter studies
+  data <- data %>%
+    filter(sample_size >= 30,
+           diag_test != "Virus_isolation")
+  
+  # Skip datasets with fewer than 5 studies
+  if (dplyr::n_distinct(data$pub_ID) < 5) {
+    message(paste0("⏩ Skipping ", dataset_name, ": fewer than 5 pub_IDs after filtering."))
+    next
+  }
+  
+  # Sort and create study labels
+  data <- data %>%
+    arrange(sampling_year) %>%
+    mutate(label = make.unique(as.character(pub_ID)))
+  
+  # Meta-analysis
+  meta_res <- tryCatch(
+    {
+      metaprop(
+        event = positive_sample,
+        n = sample_size,
+        studlab = label,
+        data = data,
+        sm = "PLOGIT",
+        method = "Inverse",
+        comb.fixed = TRUE,
+        comb.random = TRUE,
+        method.tau = "REML",
+        hakn = TRUE,
+        prediction = TRUE
+      )
+    },
+    error = function(e) {
+      message(paste0("⚠ Meta-analysis failed for ", dataset_name, ": ", e$message))
+      return(NULL)
+    }
+  )
+  
+  if (is.null(meta_res)) next
+  
+  # ===== TRIM-AND-FILL ANALYSIS =====
+  tf_res <- tryCatch({
+    trimfill(meta_res)
+  }, error = function(e) {
+    message(paste0("⚠ Trim-and-fill failed for ", dataset_name))
+    return(NULL)
+  })
+  
+  # Extract trim-and-fill results
+  if (!is.null(tf_res)) {
+    n_imputed <- tf_res$k0
+    prev_adjusted <- meta::backtransf(tf_res$TE.random, sm = meta_res$sm)
+    ciA_lb <- meta::backtransf(tf_res$lower.random, sm = meta_res$sm)
+    ciA_ub <- meta::backtransf(tf_res$upper.random, sm = meta_res$sm)
+    
+    # Calculate impact
+    prev_random <- meta::backtransf(meta_res$TE.random, sm = meta_res$sm)
+    abs_diff <- prev_adjusted - prev_random
+    rel_change <- (abs_diff / prev_random) * 100
+    
+    # Print comparison
+    message(paste0("\n🔍 Trim-and-Fill Impact for ", dataset_name, ":"))
+    message(paste0("   Original prevalence: ", round(prev_random, 3)))
+    message(paste0("   Adjusted prevalence: ", round(prev_adjusted, 3)))
+    message(paste0("   Absolute difference: ", round(abs_diff, 3)))
+    message(paste0("   Relative change: ", round(rel_change, 1), "%"))
+    message(paste0("   Number of imputed studies: ", n_imputed))
+    message(paste0("   Interpretation: ", 
+                   ifelse(n_imputed == 0, "No adjustment needed",
+                          ifelse(abs(rel_change) < 10, "Minimal impact",
+                                 ifelse(abs(rel_change) < 20, "Moderate impact", "Substantial impact")))))
+  } else {
+    n_imputed <- NA
+    prev_adjusted <- NA
+    ciA_lb <- NA
+    ciA_ub <- NA
+    abs_diff <- NA
+    rel_change <- NA
+  }
+  
+  # ===== PUBLICATION BIAS TESTS =====
+  begg_pval <- tryCatch({
+    begg_test <- metabias(meta_res, method = "rank")
+    as.numeric(begg_test$p.value)
+  }, error = function(e) {
+    message(paste0("⚠ Begg's test failed for ", dataset_name))
+    return(NA)
+  })
+  
+  egger_pval <- tryCatch({
+    egger_test <- metabias(meta_res, method = "linreg")
+    as.numeric(egger_test$p.value)
+  }, error = function(e) {
+    message(paste0("⚠ Egger's test failed for ", dataset_name))
+    return(NA)
+  })
+  
+  # Summaries
+  num_studies <- dplyr::n_distinct(data$pub_ID)
+  total_sample_size <- sum(data$sample_size, na.rm = TRUE)
+  
+  # Back-transform pooled estimates and intervals
+  prev_fixed   <- meta::backtransf(meta_res$TE.fixed,        sm = meta_res$sm)
+  ciF_lb       <- meta::backtransf(meta_res$lower.fixed,     sm = meta_res$sm)
+  ciF_ub       <- meta::backtransf(meta_res$upper.fixed,     sm = meta_res$sm)
+  
+  prev_random  <- meta::backtransf(meta_res$TE.random,       sm = meta_res$sm)
+  ciR_lb       <- meta::backtransf(meta_res$lower.random,    sm = meta_res$sm)
+  ciR_ub       <- meta::backtransf(meta_res$upper.random,    sm = meta_res$sm)
+  
+  pi_lb        <- meta::backtransf(meta_res$lower.predict,   sm = meta_res$sm)
+  pi_ub        <- meta::backtransf(meta_res$upper.predict,   sm = meta_res$sm)
+  
+  # Save results
+  pooled_results[[dataset_name]] <- data.frame(
+    Dataset            = dataset_name,
+    NumStudies         = num_studies,
+    TotalSampleSize    = total_sample_size,
+    
+    # Fixed-effect model
+    PooledPrev_Fixed   = prev_fixed,
+    CI_Fixed_LB        = ciF_lb,
+    CI_Fixed_UB        = ciF_ub,
+    
+    # Random-effects model (PRIMARY)
+    PooledPrev_Random  = prev_random,
+    CI_Random_LB       = ciR_lb,
+    CI_Random_UB       = ciR_ub,
+    
+    # Prediction interval
+    PI_Random_LB       = pi_lb,
+    PI_Random_UB       = pi_ub,
+    
+    # Heterogeneity
+    I2                 = meta_res$I2,
+    Tau2               = meta_res$tau2,
+    
+    # Publication bias tests
+    Begg_Pval          = begg_pval,
+    Egger_Pval         = egger_pval,
+    
+    # Trim-and-fill results
+    N_Imputed_Studies  = n_imputed,
+    PooledPrev_Adjusted = prev_adjusted,
+    CI_Adjusted_LB     = ciA_lb,
+    CI_Adjusted_UB     = ciA_ub,
+    Prevalence_Diff    = abs_diff,
+    Relative_Change_Pct = rel_change,
+    
+    # Publication bias impact classification
+    PubBias_Impact = ifelse(is.na(n_imputed), NA,
+                            ifelse(n_imputed == 0, "No evidence",
+                                   ifelse(abs(rel_change) < 10, "Minimal",
+                                          ifelse(abs(rel_change) < 20, "Moderate", "Substantial")))),
+    
+    stringsAsFactors   = FALSE
+  )
+}
+
+# Combine all pooled results into one dataframe
+pooled_results_df <- do.call(rbind, pooled_results)
+
+# Clean dataset names
+pooled_results_df$CleanName  <- str_replace(pooled_results_df$Dataset, "^df_", "")
+pooled_results_df$Diagnostic <- str_extract(pooled_results_df$CleanName, "^[^_]+")
+pooled_results_df <- pooled_results_df %>%
+  mutate(
+    Virus = case_when(
+      CleanName == "serological_IAV_H1N1" ~ "IAV_H1N1",
+      TRUE ~ str_extract(CleanName, "[^_]+$")
+    )
+  )
+
+pooled_results_df$NumStudies <- pooled_results_df$NumStudies
+pooled_results_df$NumSamples <- pooled_results_df$TotalSampleSize
+
+# Sort in descending order of pooled prevalence (random-effects estimate)
+pooled_results_df <- pooled_results_df %>%
+  arrange(desc(PooledPrev_Random))
+
+# Filter out serological data
+pooled_results_df <- pooled_results_df %>%
+  filter(tolower(Diagnostic) != "serological")
+
+# Export comprehensive CSV
+write.csv(pooled_results_df, 
+          file = "output/statistics/pooled_prevalence_summary_with_trimfill.csv", 
+          row.names = FALSE)
+
+message(paste0("\n✅ Exported comprehensive results with trim-and-fill statistics"))
+
+# ===== VISUALIZATION =====
+studies_fmt <- pooled_results_df$NumStudies
+samples_fmt <- format(pooled_results_df$NumSamples, big.mark=",")
+
+# Function to create the forest plot
+create_forest_plot <- function() {
+  par(family = "sans")
+  par(mar = c(4, 6, 4, 4))
+  
+  # Column positions
+  x_est     <- 1.30    # "Estimate [95% CI]"
+  x_adj     <- 1.70    # Adjusted prevalence
+  x_i2      <- 1.90    # I^2
+  x_tau2    <- 2.10    # Tau^2
+  x_begg    <- 2.30    # Begg's p
+  x_egg     <- 2.50    # Egger's p
+  x_imputed <- 2.80    # N imputed
+  x_left    <- c(-0.8, -0.6, -0.4)  # Diagnostic, Studies, Samples
+  xlim   <- c(min(x_left)-0.4, 2.95)
+  
+  k    <- nrow(pooled_results_df)
+  rows <- k:1
+  
+  # Build estimate labels
+  est_lab <- sprintf("%.3f [%.2f, %.2f]",
+                     pooled_results_df$PooledPrev_Random,
+                     pooled_results_df$CI_Random_LB,
+                     pooled_results_df$CI_Random_UB)
+  
+  # Adjusted prevalence labels
+  adj_lab <- ifelse(!is.na(pooled_results_df$PooledPrev_Adjusted),
+                    sprintf("%.3f",
+                            pooled_results_df$PooledPrev_Adjusted),
+                    "-")
+  
+  # Forest plot
+  forest(
+    x       = pooled_results_df$PooledPrev_Random,
+    ci.lb   = pooled_results_df$CI_Random_LB,
+    ci.ub   = pooled_results_df$CI_Random_UB,
+    slab    = pooled_results_df$Virus,
+    header  = "Virus",
+    ilab    = cbind(pooled_results_df$Diagnostic, studies_fmt, samples_fmt),
+    ilab.xpos = x_left + 0.15,
+    rows    = rows,
+    alim    = c(0, 1),
+    xlim    = xlim,
+    xlab    = "Pooled Prevalence",
+    mlab    = "",
+    refline = NA,
+    psize   = 1,
+    cex     = 0.9,
+    spacing = 0.8,
+    shade   = TRUE,
+    annotate = FALSE
+  )
+  
+  # Column headers
+  text(x = x_left + 0.15, y = max(rows) + 2,
+       labels = c("Diagnostic", "Studies", "Samples"),
+       cex = 0.8, font = 2)
+  text(x = c(x_est, x_adj, x_i2, x_tau2, x_begg, x_egg, x_imputed),
+       y = max(rows) + 2,
+       labels = c("Pooled Prev [95% CI]", "Adj. Prev", "I²", "Tau²",
+                  "Begg's p", "Egger's p", "Imputed No."),
+       cex = 0.8, font = 2, adj = 0.5)
+  
+  # Data columns
+  text(x = x_est,     y = rows, labels = est_lab, cex = 0.9, adj = 0.5)
+  text(x = x_adj,     y = rows, labels = adj_lab, cex = 0.9, adj = 0.5)
+  text(x = x_i2,      y = rows, labels = sprintf("%.3f", pooled_results_df$I2), cex = 0.9, adj = 0.5)
+  text(x = x_tau2,    y = rows, labels = sprintf("%.3f", pooled_results_df$Tau2), cex = 0.9, adj = 0.5)
+  text(x = x_begg,    y = rows, labels = sprintf("%.3f", pooled_results_df$Begg_Pval), cex = 0.9, adj = 0.5)
+  text(x = x_egg,     y = rows, labels = sprintf("%.3f", pooled_results_df$Egger_Pval), cex = 0.9, adj = 0.5)
+  text(x = x_imputed, y = rows,
+       labels = ifelse(is.na(pooled_results_df$N_Imputed_Studies), "-",
+                       as.character(pooled_results_df$N_Imputed_Studies)),
+       cex = 0.9, adj = 0.5)
+  
+  # Reference line
+  segments(x0 = 0.5, y0 = min(rows) - 0.5, x1 = 0.5, y1 = max(rows) + 0.5,
+           lty = 2, col = "gray40", lwd = 1.5)
+}
+
+# Export as TIFF
+ragg::agg_tiff(
+  "figures/Figure_10_pooled_prev_with_trimfill.tiff",
+  width = 14, height = 8, units = "in",
+  res = 300, compression = "lzw", background = "white"
+)
+create_forest_plot()
+dev.off()
+message("✅ TIFF exported")
+
+# Export as JPG
+ragg::agg_jpeg(
+  "figures/Figure_10_pooled_prev_with_trimfill.jpg",
+  width = 14, height = 8, units = "in",
+  res = 300, background = "white"
+)
+create_forest_plot()
+dev.off()
+message("✅ JPG exported")
+
+# Export as PDF
+pdf(
+  "figures/Figure_10_pooled_prev_with_trimfill.pdf",
+  width = 14, height = 8,
+  bg = "white"
+)
+create_forest_plot()
+dev.off()
+message("✅ PDF exported")
+
+## ========================================================================== ##
+##---------------------- FUNNEL PLOTS & PUBLICATION BIAS ---------------------##
+library(meta)
+library(dplyr)
+library(stringr)
+
+# Function to summarize publication bias tests
+summarize_pub_bias <- function(dataset_name, egger_result, begg_result, n_studies) {
+  # Egger's test
+  egger_stat <- if (!is.null(egger_result)) round(egger_result$statistic, 3) else NA
+  egger_p <- if (!is.null(egger_result)) signif(egger_result$p.value, 3) else NA
+  egger_interp <- if (!is.null(egger_result)) {
+    ifelse(egger_result$p.value < 0.05, "Significant asymmetry detected", "No significant asymmetry")
+  } else NA
+  
+  # Begg's test
+  begg_stat <- if (!is.null(begg_result)) round(begg_result$statistic, 3) else NA
+  begg_p <- if (!is.null(begg_result)) signif(begg_result$p.value, 3) else NA
+  begg_interp <- if (!is.null(begg_result)) {
+    ifelse(begg_result$p.value < 0.05, "Significant asymmetry detected", "No significant asymmetry")
+  } else NA
+  
+  # Overall interpretation
+  overall <- if (!is.na(egger_p) && !is.na(begg_p)) {
+    if (egger_p < 0.05 && begg_p < 0.05) {
+      "Both tests indicate publication bias"
+    } else if (egger_p < 0.05 || begg_p < 0.05) {
+      "Mixed evidence of publication bias"
+    } else {
+      "No strong evidence of publication bias"
+    }
+  } else NA
+  
+  data.frame(
+    dataset = dataset_name,
+    n_studies = n_studies,
+    egger_t = egger_stat,
+    egger_p = egger_p,
+    egger_interpretation = egger_interp,
+    begg_z = begg_stat,
+    begg_p = begg_p,
+    begg_interpretation = begg_interp,
+    overall_interpretation = overall
+  )
+}
+
+# Initialize results collector
+pub_bias_results <- list()
+
+# Main loop
+for (dataset_name in dataset_names) {
+  data <- get(dataset_name)
+  
+  # Track original size
+  total_rows_raw <- nrow(data)
+  
+  # Filter studies with at least 30 samples
+  data_sample_filtered <- data %>%
+    filter(sample_size >= 30)
+  n_rows_after_sample <- nrow(data_sample_filtered)
+  
+  # Check if sample_size >= 30 for ALL remaining rows
+  meets_sample_criteria <- n_rows_after_sample > 0 &&
+    all(data_sample_filtered$sample_size >= 30)
+  
+  # Exclude studies using virus isolation
+  data_filtered <- data_sample_filtered %>%
+    filter(diag_test != "Virus_isolation")
+  n_rows_after_diag <- nrow(data_filtered)
+  n_unique_pubs <- length(unique(data_filtered$pub_ID))
+  
+  # Check criteria
+  meets_pub_id_criteria <- n_unique_pubs >= 5
+  meets_overall <- meets_pub_id_criteria && meets_sample_criteria
+  
+  # Determine reason for exclusion
+  if (!meets_overall) {
+    if (n_rows_after_sample == 0) {
+      reason <- "No studies with sample_size >= 30"
+    } else if (!meets_sample_criteria) {
+      reason <- "Some studies have sample_size < 30"
+    } else if (n_rows_after_diag == 0) {
+      reason <- "No studies after excluding virus isolation"
+    } else if (!meets_pub_id_criteria) {
+      reason <- paste0("Only ", n_unique_pubs, " pub_IDs (need ≥5)")
+    } else {
+      reason <- "Unknown exclusion reason"
+    }
+    message(paste0("⏩ Skipping ", dataset_name, ": ", reason))
+    next
+  }
+  
+  # Use filtered data
+  data <- data_filtered
+  
+  # Sort by sampling year
+  data <- data %>%
+    arrange(sampling_year)
+  
+  # Create study label
+  data <- data %>%
+    mutate(label = paste0(pub_ID, " (", sampling_year, ")"))
+  
+  # Meta-analysis object (random-effects only)
+  meta_res <- metaprop(
+    event = positive_sample,
+    n = sample_size,
+    studlab = label,
+    data = data,
+    sm = "PLOGIT",
+    method = "Inverse",
+    comb.fixed = FALSE,
+    comb.random = TRUE,
+    method.tau = "REML",
+    hakn = TRUE
+  )
+  
+  # Egger's test
+  egger <- tryCatch({
+    metabias(meta_res, method = "linreg")
+  }, error = function(e) {
+    message(paste0("⚠ Egger's test failed for ", dataset_name))
+    return(NULL)
+  })
+  
+  # Begg's rank correlation test
+  begg <- tryCatch({
+    metabias(meta_res, method = "rank")
+  }, error = function(e) {
+    message(paste0("⚠ Begg's rank test failed for ", dataset_name))
+    return(NULL)
+  })
+  
+  # Store results
+  n_studies <- nrow(data)
+  pub_bias_results[[dataset_name]] <- summarize_pub_bias(dataset_name, egger, begg, n_studies)
+  
+  # Dynamic figure size based on number of studies
+  fig_width <- 4000
+  fig_height <- max(2800, n_studies * 50)
+  
+  # Base filename
+  base_filename <- paste0("figures/funnel/funnel_", dataset_name)
+  
+  # Function to create the funnel plot
+  create_funnel_plot <- function() {
+    # Make room below the plot for notes + legend
+    op <- par(no.readonly = TRUE)
+    par(mar = c(10, 4, 2, 2))
+    
+    # Funnel plot (random-effects only)
+    funnel(meta_res,
+           comb.fixed = FALSE,
+           comb.random = TRUE,
+           xlab = "Prevalence (logit scale)",
+           ylab = "Standard Error",
+           studlab = FALSE,
+           contour = c(0.9, 0.95, 0.99),
+           col.contour = c("yellowgreen", "orange2", "indianred2"),
+           pch = 19
+    )
+    
+    # Add test results in bottom margin
+    line_base <- 3
+    if (!is.null(egger)) {
+      egger_text <- paste0("Egger's test: t = ", round(egger$statistic, 3),
+                           ", p = ", signif(egger$p.value, 3))
+      mtext(egger_text, side = 1, line = line_base + 0.5, cex = 1, adj = 0)
+      line_base <- line_base + 1.2
+    }
+    if (!is.null(begg)) {
+      begg_text <- paste0("Begg's rank test: z = ", round(begg$statistic, 3),
+                          ", p = ", signif(begg$p.value, 3))
+      mtext(begg_text, side = 1, line = line_base + 0.5, cex = 1, adj = 0)
+      line_base <- line_base + 1.2
+    }
+    mtext("Dashed vertical line indicates pooled random-effects summary.",
+          side = 1, line = line_base + 1, cex = 1, adj = 0)
+    
+    # Legend
+    legend("bottomleft",
+           inset = c(0.90, -0.27),
+           xpd = NA,
+           title = "Contours",
+           legend = c("p < 0.10", "p < 0.05", "p < 0.01"),
+           fill = c("yellowgreen", "orange2", "indianred2"),
+           border = NA, bty = "n", cex = 1)
+    
+    par(op)
+  }
+  
+  # Export as TIFF
+  tiff(filename = paste0(base_filename, ".tiff"),
+       width = fig_width, height = fig_height, res = 300)
+  create_funnel_plot()
+  dev.off()
+  
+  # Export as PDF
+  pdf(file = paste0(base_filename, ".pdf"),
+      width = fig_width/300, height = fig_height/300)
+  create_funnel_plot()
+  dev.off()
+  
+  # Export as JPG
+  jpeg(filename = paste0(base_filename, ".jpg"),
+       width = fig_width, height = fig_height, res = 300, quality = 95)
+  create_funnel_plot()
+  dev.off()
+  
+  message(paste0("✅ Funnel plots created for ", dataset_name, " (", n_studies, " studies) in TIFF, PDF, and JPG"))
+}
+
+# Export publication bias statistics
+if (length(pub_bias_results) > 0) {
+  pub_bias_df <- bind_rows(pub_bias_results)
+  write.csv(pub_bias_df,
+            "output/statistics/publication_bias_tests.csv",
+            row.names = FALSE)
+  message("✅ Publication bias statistics exported to output/statistics/publication_bias_tests.csv")
+}
